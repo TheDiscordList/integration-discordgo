@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+      # Go modules publish from the tag itself. Fetching it once through the
+      # proxy is what makes pkg.go.dev index the new version.
+      - name: Announce the version to proxy.golang.org
+        run: |
+          cd "$(mktemp -d)"
+          GOPROXY=proxy.golang.org go list -m "github.com/TheDiscordList/integration-discordgo@$GITHUB_REF_NAME"
