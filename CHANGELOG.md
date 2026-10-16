@@ -5,7 +5,7 @@ tags; see "Publishing" in the README.
 
 ## Unreleased
 
-## 0.1.0
+## 0.1.0 - 2026-10-16
 
 - `Autopost` and `AutopostShards`: server count, per-shard heartbeats and
   global slash commands, published from discordgo's session state and events.
