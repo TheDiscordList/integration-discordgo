@@ -124,8 +124,8 @@ type BotAdded struct {
 	User    *User     `json:"user"`
 }
 
-// StatsReported is the data of bot.stats_reported. It also fires on manual
-// edits in the web UI, not only as an echo of your own stats post.
+// StatsReported is the data of bot.stats_reported. It also fires on owner
+// edits in the web UI and on the heartbeat's stats forward.
 type StatsReported struct {
 	GuildCount *int      `json:"guild_count"`
 	ShardCount *int      `json:"shard_count"`
