@@ -456,6 +456,47 @@ func TestRateLimitIsRetriedBeforeTheNextTick(t *testing.T) {
 	}
 }
 
+func TestHeartbeatIntervalIsClampedAndRetuned(t *testing.T) {
+	f := newFakeAPI(t)
+	f.queue("heartbeat", reply{status: 200, body: `{"next_beat_within_seconds":150}`})
+	p := Autopost(newSession(t, f, 0, 1), "tok", testOptions(f, WithoutStats(), WithoutCommands(), WithHeartbeatInterval(time.Second))...)
+	prime(p)
+	if p.beatInterval != heartbeatMin {
+		t.Fatalf("starting interval = %v, want %v", p.beatInterval, heartbeatMin)
+	}
+
+	if res := p.PostHeartbeat(context.Background()); !res.OK {
+		t.Fatalf("PostHeartbeat = %+v", res)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.beatInterval != 50*time.Second || p.cfg.heartbeatInterval != time.Second {
+		t.Fatalf("interval = %v, configured = %v; want 50s retuned, 1s untouched", p.beatInterval, p.cfg.heartbeatInterval)
+	}
+}
+
+func TestOutOfBandBeatKeepsItsDistance(t *testing.T) {
+	f := newFakeAPI(t)
+	p := Autopost(newSession(t, f, 0, 1), "tok", testOptions(f, WithBotID("123"), WithoutStats(), WithoutCommands())...)
+	defer p.Stop()
+	waitFor(t, "the first heartbeat", func() bool { return len(f.requests("heartbeat")) == 1 })
+	// Wait for that beat to finish rescheduling itself.
+	p.heartbeat.sending.Lock()
+	p.heartbeat.sending.Unlock()
+
+	p.onStatus(p.shards[0], "ready")
+	time.Sleep(1500 * time.Millisecond)
+	if n := len(f.requests("heartbeat")); n != 1 {
+		t.Fatalf("heartbeats = %d, want 1 within %v of the last", n, heartbeatSoonGap)
+	}
+
+	p.mu.Lock()
+	p.lastBeatAt = p.lastBeatAt.Add(-heartbeatSoonGap)
+	p.mu.Unlock()
+	p.onStatus(p.shards[0], "connecting")
+	waitFor(t, "the out-of-band heartbeat", func() bool { return len(f.requests("heartbeat")) == 2 })
+}
+
 func TestUnknownClusterCountSendsNoHeartbeat(t *testing.T) {
 	f := newFakeAPI(t)
 	var ev events

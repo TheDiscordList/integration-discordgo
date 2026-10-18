@@ -47,7 +47,7 @@ recommended production setup. It starts three publishers:
 | Publisher | What it sends | Cadence |
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5s after READY, then every 5 min, debounced (20s) on guild join/leave |
-| Heartbeat | per-shard status, latency and guild counts | every ~30s, plus 1s after any shard connects, resumes or drops |
+| Heartbeat | per-shard status, latency and guild counts | every 30–35s, plus once when a shard connects, resumes or drops (at least 10s after the previous beat) |
 | Commands | your registered global slash commands | once, ~10s after READY |
 
 Your **stats token** is on the listing's manage page, under the API tab. It is
@@ -127,7 +127,7 @@ thediscordlist.Autopost(session, token,
 	thediscordlist.WithBaseURL("https://thediscordlist.com/api"),
 
 	thediscordlist.WithStatsInterval(5*time.Minute),
-	thediscordlist.WithHeartbeatInterval(30*time.Second), // retuned from the API's response
+	thediscordlist.WithHeartbeatInterval(30*time.Second), // 15–60s, retuned from the API's response
 	thediscordlist.WithPostEmptyCommands(),               // an empty list CLEARS the listing
 
 	thediscordlist.WithoutStats(),

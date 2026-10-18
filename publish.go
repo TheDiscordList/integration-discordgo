@@ -23,6 +23,7 @@ const (
 	heartbeatMin      = 15 * time.Second
 	heartbeatMax      = time.Minute
 	heartbeatJitter   = 5 * time.Second
+	heartbeatSoonGap  = 10 * time.Second
 
 	// Offset from the first stats post: both share one server-side rate budget.
 	commandsDelay = 10 * time.Second
@@ -93,10 +94,11 @@ func (p *Poster) startAllLocked() {
 
 // beatSoonLocked sends an out-of-band heartbeat after a shard transition. A
 // 30s cadence against a 90s grace window leaves no margin during a reconnect.
-// Repeated calls coalesce into one beat.
+// Repeated calls coalesce into one beat, at least heartbeatSoonGap after the
+// previous one, so a flapping shard cannot spend the heartbeat rate limit.
 func (p *Poster) beatSoonLocked() {
 	if p.beating && p.heartbeat.disabled == "" {
-		p.scheduleLocked(p.heartbeat, time.Second, p.tickHeartbeat)
+		p.scheduleLocked(p.heartbeat, max(time.Second, heartbeatSoonGap-time.Since(p.lastBeatAt)), p.tickHeartbeat)
 	}
 }
 
@@ -267,7 +269,8 @@ func (p *Poster) beat(ctx context.Context, manual bool) Result {
 		return Result{Skipped: "plan"}
 	}
 	body := heartbeatBody{Cluster: p.topo.clusterID, ClusterCount: p.topo.clusterCount, Shards: p.collectShardsLocked()}
-	botID, interval := p.botID, p.cfg.heartbeatInterval
+	botID, interval := p.botID, p.beatInterval
+	p.lastBeatAt = start
 	p.mu.Unlock()
 
 	res, respBody := p.send(ctx, pub, "/bots/"+botID+"/heartbeat", body, true, interval)
@@ -281,11 +284,11 @@ func (p *Poster) beat(ctx context.Context, manual bool) Result {
 	}
 	if res.OK && json.Unmarshal(respBody, &reply) == nil && reply.NextBeatWithinSeconds > 0 {
 		proposed := time.Duration(reply.NextBeatWithinSeconds / 3 * float64(time.Second))
-		p.cfg.heartbeatInterval = min(max(proposed, heartbeatMin), heartbeatMax)
+		p.beatInterval = min(max(proposed, heartbeatMin), heartbeatMax)
 	}
 	if p.beating && pub.disabled == "" {
 		jitter := time.Duration(rand.Int64N(int64(heartbeatJitter)))
-		delay := max(p.cfg.heartbeatInterval+jitter-time.Since(start), time.Second, time.Until(pub.suspendedUntil))
+		delay := max(p.beatInterval+jitter-time.Since(start), time.Second, time.Until(pub.suspendedUntil))
 		p.scheduleLocked(pub, delay, p.tickHeartbeat)
 	}
 	return res

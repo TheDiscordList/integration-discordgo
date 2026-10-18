@@ -109,8 +109,8 @@ func WithBotID(id string) Option { return func(c *config) { c.botID = id } }
 // WithStatsInterval sets the stats cadence. Default 5 minutes.
 func WithStatsInterval(d time.Duration) Option { return func(c *config) { c.statsInterval = d } }
 
-// WithHeartbeatInterval sets the starting heartbeat cadence. It is retuned
-// from the API's response. Default 30 seconds.
+// WithHeartbeatInterval sets the starting heartbeat cadence, clamped to 15–60
+// seconds. It is retuned from the API's response. Default 30 seconds.
 func WithHeartbeatInterval(d time.Duration) Option {
 	return func(c *config) { c.heartbeatInterval = d }
 }
@@ -206,6 +206,8 @@ type Poster struct {
 	lastCount      int
 	lastShardCount int
 	debounceCap    time.Time
+	lastBeatAt     time.Time
+	beatInterval   time.Duration
 }
 
 // Autopost wires one discordgo session to a TheDiscordList listing. Call it
@@ -243,7 +245,8 @@ func AutopostShards(sessions []*discordgo.Session, token string, opts ...Option)
 		opt(&cfg)
 	}
 
-	p := &Poster{cfg: cfg, warned: map[string]bool{}, lastCount: -1}
+	p := &Poster{cfg: cfg, warned: map[string]bool{}, lastCount: -1,
+		beatInterval: min(max(cfg.heartbeatInterval, heartbeatMin), heartbeatMax)}
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 
 	token = strings.TrimSpace(token)
