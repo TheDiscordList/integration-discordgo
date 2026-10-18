@@ -208,7 +208,7 @@ func TestMissingTokenIsInert(t *testing.T) {
 
 func TestStatsRequestShaping(t *testing.T) {
 	f := newFakeAPI(t)
-	p := Autopost(newSession(t, f, 0, 1, "g1", "g2"), " tdl-token ", testOptions(f, WithoutHeartbeat())...)
+	p := Autopost(newSession(t, f, 0, 1, "g1", "g2"), " Bearer tdl-token ", testOptions(f, WithoutHeartbeat())...)
 	prime(p)
 
 	res := p.PostStats(context.Background())

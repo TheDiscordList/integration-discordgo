@@ -52,6 +52,7 @@ recommended production setup. It starts three publishers:
 
 Your **stats token** is on the listing's manage page, under the API tab. It is
 scoped to one listing, so it is the only credential this package needs.
+Surrounding whitespace and a pasted `Bearer ` prefix are stripped.
 
 `Autopost` is safe to call before or after `session.Open()`. The bot id is read
 from READY, and the server count from `session.State`. With an empty token it

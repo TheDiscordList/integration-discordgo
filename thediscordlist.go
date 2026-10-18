@@ -249,7 +249,7 @@ func AutopostShards(sessions []*discordgo.Session, token string, opts ...Option)
 		beatInterval: min(max(cfg.heartbeatInterval, heartbeatMin), heartbeatMax)}
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 
-	token = strings.TrimSpace(token)
+	token = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(token), "Bearer "))
 	if token == "" {
 		p.warn("no-token", "no stats token supplied; auto-posting is disabled")
 		return p
