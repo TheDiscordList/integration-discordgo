@@ -208,7 +208,7 @@ func TestMissingTokenIsInert(t *testing.T) {
 
 func TestStatsRequestShaping(t *testing.T) {
 	f := newFakeAPI(t)
-	p := Autopost(newSession(t, f, 0, 1, "g1", "g2"), " tdl-token ", testOptions(f, WithoutHeartbeat())...)
+	p := Autopost(newSession(t, f, 0, 1, "g1", "g2"), " Bearer tdl-token ", testOptions(f, WithoutHeartbeat())...)
 	prime(p)
 
 	res := p.PostStats(context.Background())
@@ -260,7 +260,7 @@ func TestHeartbeatPayload(t *testing.T) {
 	}
 }
 
-func TestCommandsShaping(t *testing.T) {
+func TestCommandsAreForwarded(t *testing.T) {
 	f := newFakeAPI(t)
 	f.commands = `[{"id":"1","application_id":"123","version":"9","type":1,"name":"ping","description":"Pong",
 		"default_member_permissions":"8","nsfw":false,"options":[{"type":3,"name":"word","description":"A word",
@@ -274,15 +274,17 @@ func TestCommandsShaping(t *testing.T) {
 		t.Fatalf("PostCommands = %+v", res)
 	}
 	got := f.requests("commands")[0].body
-	want := `{"commands":[{"type":1,"name":"ping","description":"Pong","nsfw":false,"default_member_permissions":"8",` +
-		`"options":[{"type":3,"name":"word","description":"A word","required":true,"choices":[{"name":"a","value":"a"},{"name":"n","value":2}]},` +
-		`{"type":1,"name":"sub","description":"Sub","options":[{"type":4,"name":"n","description":"N"}]}]},` +
-		`{"type":2,"name":"Inspect"}]}`
-	if got != want {
-		t.Errorf("body = %s\nwant   %s", got, want)
-	}
-	if strings.Contains(got, "null") {
-		t.Errorf("body contains null: %s", got)
+	for _, want := range []string{
+		`{"commands":[{"id":"1",`,
+		`"name":"ping"`,
+		`"default_member_permissions":"8"`,
+		`"choices":[{"name":"a","value":"a"},{"name":"n","value":2}]`,
+		`"options":[{"type":4,"name":"n","description":"N"`,
+		`"type":2,"name":"Inspect"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("body lacks %s: %s", want, got)
+		}
 	}
 }
 
@@ -325,6 +327,8 @@ func TestStatusHandling(t *testing.T) {
 		{"409 disables commands", KindCommands, []int{409}, Result{Status: 409}, 1, map[Kind]string{KindCommands: "conflict"}, 0},
 		{"422 is reported and stays enabled", KindStats, []int{422}, Result{Status: 422}, 1, map[Kind]string{}, 1},
 		{"5xx is retried", KindStats, []int{502, 500, 200}, Result{OK: true, Status: 200}, 3, map[Kind]string{}, 0},
+		{"408 and 425 are retried", KindStats, []int{408, 425, 200}, Result{OK: true, Status: 200}, 3, map[Kind]string{}, 0},
+		{"other 4xx is reported, not retried", KindStats, []int{413}, Result{Status: 413}, 1, map[Kind]string{}, 1},
 		{"5xx gives up after three attempts", KindHeartbeat, []int{503, 503, 503}, Result{Status: 503}, 3, map[Kind]string{}, 1},
 	}
 	for _, tt := range tests {
@@ -403,13 +407,15 @@ func TestRateLimitSuspension(t *testing.T) {
 		{"X-RateLimit-Reset wins when later", map[string]string{
 			"Retry-After": "5", "X-RateLimit-Reset": strconv.FormatInt(time.Now().Add(10*time.Minute).Unix(), 10),
 		}, 9 * time.Minute, 11 * time.Minute},
+		{"capped at an hour", map[string]string{"Retry-After": "86400"}, time.Hour, time.Hour + 3*time.Second},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newFakeAPI(t)
 			f.commands = `[{"type":1,"name":"ping","description":"Pong"}]`
 			f.queue("stats", reply{status: 429, header: tt.header, body: "{}"})
-			p := Autopost(newSession(t, f, 0, 1, "g1"), "tok", testOptions(f)...)
+			// Every wait outlasts the next tick, so the 429 is not retried.
+			p := Autopost(newSession(t, f, 0, 1, "g1"), "tok", testOptions(f, func(c *config) { c.statsInterval = 30 * time.Second })...)
 			prime(p)
 
 			if res := p.PostStats(context.Background()); res != (Result{Status: 429, Skipped: "throttled"}) {
@@ -434,6 +440,61 @@ func TestRateLimitSuspension(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRateLimitIsRetriedBeforeTheNextTick(t *testing.T) {
+	f := newFakeAPI(t)
+	f.queue("stats", reply{status: 429, header: map[string]string{"Retry-After": "0.01"}, body: "{}"})
+	p := Autopost(newSession(t, f, 0, 1, "g1"), "tok", testOptions(f, WithoutHeartbeat())...)
+	prime(p)
+
+	if res := p.PostStats(context.Background()); !res.OK {
+		t.Fatalf("PostStats = %+v, want sent once the wait passed", res)
+	}
+	if n := len(f.requests("stats")); n != 2 {
+		t.Fatalf("stats requests = %d, want 2", n)
+	}
+}
+
+func TestHeartbeatIntervalIsClampedAndRetuned(t *testing.T) {
+	f := newFakeAPI(t)
+	f.queue("heartbeat", reply{status: 200, body: `{"next_beat_within_seconds":150}`})
+	p := Autopost(newSession(t, f, 0, 1), "tok", testOptions(f, WithoutStats(), WithoutCommands(), WithHeartbeatInterval(time.Second))...)
+	prime(p)
+	if p.beatInterval != heartbeatMin {
+		t.Fatalf("starting interval = %v, want %v", p.beatInterval, heartbeatMin)
+	}
+
+	if res := p.PostHeartbeat(context.Background()); !res.OK {
+		t.Fatalf("PostHeartbeat = %+v", res)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.beatInterval != 50*time.Second || p.cfg.heartbeatInterval != time.Second {
+		t.Fatalf("interval = %v, configured = %v; want 50s retuned, 1s untouched", p.beatInterval, p.cfg.heartbeatInterval)
+	}
+}
+
+func TestOutOfBandBeatKeepsItsDistance(t *testing.T) {
+	f := newFakeAPI(t)
+	p := Autopost(newSession(t, f, 0, 1), "tok", testOptions(f, WithBotID("123"), WithoutStats(), WithoutCommands())...)
+	defer p.Stop()
+	waitFor(t, "the first heartbeat", func() bool { return len(f.requests("heartbeat")) == 1 })
+	// Wait for that beat to finish rescheduling itself.
+	p.heartbeat.sending.Lock()
+	p.heartbeat.sending.Unlock()
+
+	p.onStatus(p.shards[0], "ready")
+	time.Sleep(1500 * time.Millisecond)
+	if n := len(f.requests("heartbeat")); n != 1 {
+		t.Fatalf("heartbeats = %d, want 1 within %v of the last", n, heartbeatSoonGap)
+	}
+
+	p.mu.Lock()
+	p.lastBeatAt = p.lastBeatAt.Add(-heartbeatSoonGap)
+	p.mu.Unlock()
+	p.onStatus(p.shards[0], "connecting")
+	waitFor(t, "the out-of-band heartbeat", func() bool { return len(f.requests("heartbeat")) == 2 })
 }
 
 func TestUnknownClusterCountSendsNoHeartbeat(t *testing.T) {

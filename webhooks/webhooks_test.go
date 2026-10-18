@@ -81,6 +81,8 @@ func TestVerify(t *testing.T) {
 		{"non-finite t", vectorBody, "t=Inf,v1=" + vectorV1, vectorSecret, vectorNow, MalformedSignature},
 		{"garbage header", vectorBody, "garbage", vectorSecret, vectorNow, MalformedSignature},
 		{"body is not JSON", "not json", "t=1700000000,v1=" + sign(vectorSecret, vectorT, "not json"), vectorSecret, vectorNow, MalformedBody},
+		{"empty secret", vectorBody, "t=1700000000,v1=" + sign("", vectorT, vectorBody), "", vectorNow, MissingSecret},
+		{"blank secret", vectorBody, "t=1700000000,v1=" + sign(" ", vectorT, vectorBody), " ", vectorNow, MissingSecret},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -109,6 +111,42 @@ func TestUnknownEventParses(t *testing.T) {
 	}
 }
 
+func TestBumpReadyParses(t *testing.T) {
+	body := `{"id":"d4","event":"listing.bump_ready","created_at":"2026-10-18T12:00:00+00:00",` +
+		`"listing":{"id":"9","type":"server","name":"S","url":"https://thediscordlist.com/servers/9"},` +
+		`"data":{"ready_at":"2026-10-18T12:00:00+00:00"}}`
+	now := time.Now()
+	event, err := VerifyAt([]byte(body), "t="+strconv.FormatInt(now.Unix(), 10)+",v1="+sign("s", now.Unix(), body), "s", DefaultTolerance, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ready BumpReady
+	if err := json.Unmarshal(event.Data, &ready); err != nil || event.Event != EventListingBumpReady ||
+		!ready.ReadyAt.Equal(time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("event = %+v, data = %+v, err = %v", event, ready, err)
+	}
+}
+
+func TestHandlerRefusesAnEmptySecret(t *testing.T) {
+	h := NewHandler("", func(context.Context, *Event, Delivery) error {
+		t.Error("OnEvent ran without a secret")
+		return nil
+	})
+	var reported error
+	h.OnError = func(err error) { reported = err }
+
+	now := time.Now().Unix()
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/tdl", strings.NewReader(vectorBody))
+	req.Header.Set(SignatureHeader, "t="+strconv.FormatInt(now, 10)+",v1="+sign("", now, vectorBody))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var verr *Error
+	if rec.Code != http.StatusInternalServerError || !errors.As(reported, &verr) || verr.Code != MissingSecret {
+		t.Fatalf("status = %d, reported = %v", rec.Code, reported)
+	}
+}
+
 func TestHandler(t *testing.T) {
 	signed := func(body string) http.Header {
 		now := time.Now().Unix()
@@ -121,6 +159,8 @@ func TestHandler(t *testing.T) {
 	ping := vectorBody
 	unknown := strings.Replace(vectorBody, "webhook.ping", "listing.renamed", 1)
 	upvoted := strings.Replace(vectorBody, "webhook.ping", "listing.upvoted", 1)
+	malformed := http.Header{}
+	malformed.Set(SignatureHeader, "garbage")
 
 	var (
 		mu   sync.Mutex
@@ -155,8 +195,9 @@ func TestHandler(t *testing.T) {
 			signed(strings.Replace(ping, "webhook.ping", "panic", 1)), http.StatusInternalServerError},
 		{"overrun answers 202", http.MethodPost, strings.Replace(ping, "webhook.ping", "slow", 1),
 			signed(strings.Replace(ping, "webhook.ping", "slow", 1)), http.StatusAccepted},
-		{"bad signature answers 400", http.MethodPost, ping, signed(unknown), http.StatusBadRequest},
-		{"missing signature answers 400", http.MethodPost, ping, http.Header{}, http.StatusBadRequest},
+		{"bad signature answers 401", http.MethodPost, ping, signed(unknown), http.StatusUnauthorized},
+		{"missing signature answers 401", http.MethodPost, ping, http.Header{}, http.StatusUnauthorized},
+		{"malformed signature answers 400", http.MethodPost, ping, malformed, http.StatusBadRequest},
 		{"GET answers 405", http.MethodGet, "", http.Header{}, http.StatusMethodNotAllowed},
 		{"oversized body answers 413", http.MethodPost, strings.Repeat("x", MaxBodyBytes+1), http.Header{}, http.StatusRequestEntityTooLarge},
 	}
@@ -175,7 +216,7 @@ func TestHandler(t *testing.T) {
 			if rec.Code != tt.want {
 				t.Fatalf("status = %d, want %d", rec.Code, tt.want)
 			}
-			if tt.want == http.StatusBadRequest && reported == nil {
+			if (tt.want == http.StatusBadRequest || tt.want == http.StatusUnauthorized) && reported == nil {
 				t.Fatal("verification failure was not reported")
 			}
 		})

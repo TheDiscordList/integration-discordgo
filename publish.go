@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
-	"strconv"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -24,6 +23,7 @@ const (
 	heartbeatMin      = 15 * time.Second
 	heartbeatMax      = time.Minute
 	heartbeatJitter   = 5 * time.Second
+	heartbeatSoonGap  = 10 * time.Second
 
 	// Offset from the first stats post: both share one server-side rate budget.
 	commandsDelay = 10 * time.Second
@@ -32,6 +32,7 @@ const (
 	requestTimeout = 10 * time.Second
 	maxAttempts    = 3
 	maxLatency     = 10 * time.Minute
+	maxThrottle    = time.Hour
 )
 
 func (p *Poster) scheduleLocked(pub *publisher, d time.Duration, run func(context.Context)) {
@@ -93,10 +94,11 @@ func (p *Poster) startAllLocked() {
 
 // beatSoonLocked sends an out-of-band heartbeat after a shard transition. A
 // 30s cadence against a 90s grace window leaves no margin during a reconnect.
-// Repeated calls coalesce into one beat.
+// Repeated calls coalesce into one beat, at least heartbeatSoonGap after the
+// previous one, so a flapping shard cannot spend the heartbeat rate limit.
 func (p *Poster) beatSoonLocked() {
 	if p.beating && p.heartbeat.disabled == "" {
-		p.scheduleLocked(p.heartbeat, time.Second, p.tickHeartbeat)
+		p.scheduleLocked(p.heartbeat, max(time.Second, heartbeatSoonGap-time.Since(p.lastBeatAt)), p.tickHeartbeat)
 	}
 }
 
@@ -111,8 +113,7 @@ func (p *Poster) guildChangedLocked() {
 	if p.debounceCap.IsZero() {
 		p.debounceCap = now.Add(p.cfg.statsMinGap)
 	}
-	at := min(now.Add(p.cfg.statsDebounce).UnixNano(), p.debounceCap.UnixNano())
-	p.scheduleLocked(p.stats, time.Duration(at-now.UnixNano()), p.tickStats)
+	p.scheduleLocked(p.stats, min(p.cfg.statsDebounce, p.debounceCap.Sub(now)), p.tickStats)
 }
 
 func (p *Poster) tickStats(ctx context.Context)     { p.publishStats(ctx, false) }
@@ -268,7 +269,8 @@ func (p *Poster) beat(ctx context.Context, manual bool) Result {
 		return Result{Skipped: "plan"}
 	}
 	body := heartbeatBody{Cluster: p.topo.clusterID, ClusterCount: p.topo.clusterCount, Shards: p.collectShardsLocked()}
-	botID, interval := p.botID, p.cfg.heartbeatInterval
+	botID, interval := p.botID, p.beatInterval
+	p.lastBeatAt = start
 	p.mu.Unlock()
 
 	res, respBody := p.send(ctx, pub, "/bots/"+botID+"/heartbeat", body, true, interval)
@@ -282,76 +284,18 @@ func (p *Poster) beat(ctx context.Context, manual bool) Result {
 	}
 	if res.OK && json.Unmarshal(respBody, &reply) == nil && reply.NextBeatWithinSeconds > 0 {
 		proposed := time.Duration(reply.NextBeatWithinSeconds / 3 * float64(time.Second))
-		p.cfg.heartbeatInterval = min(max(proposed, heartbeatMin), heartbeatMax)
+		p.beatInterval = min(max(proposed, heartbeatMin), heartbeatMax)
 	}
 	if p.beating && pub.disabled == "" {
 		jitter := time.Duration(rand.Int64N(int64(heartbeatJitter)))
-		delay := max(p.cfg.heartbeatInterval+jitter-time.Since(start), time.Second, time.Until(pub.suspendedUntil))
+		delay := max(p.beatInterval+jitter-time.Since(start), time.Second, time.Until(pub.suspendedUntil))
 		p.scheduleLocked(pub, delay, p.tickHeartbeat)
 	}
 	return res
 }
 
 type commandsBody struct {
-	Commands []wireCommand `json:"commands"`
-}
-
-// wireCommand is the subset of a Discord application command the API takes.
-// discordgo's own structs marshal absent options as null, which is a 422.
-type wireCommand struct {
-	Type                     int          `json:"type,omitempty"`
-	Name                     string       `json:"name"`
-	Description              string       `json:"description,omitempty"`
-	NSFW                     *bool        `json:"nsfw,omitempty"`
-	DefaultMemberPermissions *string      `json:"default_member_permissions,omitempty"`
-	Options                  []wireOption `json:"options,omitempty"`
-}
-
-type wireOption struct {
-	Type        int          `json:"type"`
-	Name        string       `json:"name"`
-	Description string       `json:"description"`
-	Required    bool         `json:"required,omitempty"`
-	Choices     []wireChoice `json:"choices,omitempty"`
-	Options     []wireOption `json:"options,omitempty"`
-}
-
-type wireChoice struct {
-	Name  string `json:"name"`
-	Value any    `json:"value"`
-}
-
-func toWireCommands(cmds []*discordgo.ApplicationCommand) []wireCommand {
-	out := make([]wireCommand, 0, len(cmds))
-	for _, c := range cmds {
-		if c == nil {
-			continue
-		}
-		w := wireCommand{Type: int(c.Type), Name: c.Name, Description: c.Description, NSFW: c.NSFW, Options: toWireOptions(c.Options)}
-		if c.DefaultMemberPermissions != nil {
-			perms := strconv.FormatInt(*c.DefaultMemberPermissions, 10)
-			w.DefaultMemberPermissions = &perms
-		}
-		out = append(out, w)
-	}
-	return out
-}
-
-func toWireOptions(opts []*discordgo.ApplicationCommandOption) []wireOption {
-	var out []wireOption
-	for _, o := range opts {
-		if o == nil {
-			continue
-		}
-		w := wireOption{Type: int(o.Type), Name: o.Name, Description: o.Description, Required: o.Required, Options: toWireOptions(o.Options)}
-		for _, c := range o.Choices {
-			if c != nil {
-				w.Choices = append(w.Choices, wireChoice{Name: c.Name, Value: c.Value})
-			}
-		}
-		out = append(out, w)
-	}
-	return out
+	Commands []*discordgo.ApplicationCommand `json:"commands"`
 }
 
 func (p *Poster) publishCommands(ctx context.Context) Result {
@@ -380,20 +324,24 @@ func (p *Poster) publishCommands(ctx context.Context) Result {
 	if len(cmds) == 0 && !p.cfg.postEmpty {
 		return Result{Skipped: "empty"}
 	}
-	res, _ := p.send(ctx, pub, "/bots/"+botID+"/commands", commandsBody{toWireCommands(cmds)}, false, 0)
+	res, _ := p.send(ctx, pub, "/bots/"+botID+"/commands", commandsBody{cmds}, false, 0)
 	return res
 }
 
-// send retries transient failures only. A backoff that would outlast the
-// publisher's next tick is dropped: the next tick carries fresher data.
+// send retries transient failures after a backoff and a 429 after its wait.
+// A delay that would outlast the publisher's next tick is dropped: the next
+// tick carries fresher data.
 func (p *Poster) send(ctx context.Context, pub *publisher, path string, body any, heartbeat bool, nextTick time.Duration) (Result, []byte) {
 	var out outcome
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		out = p.api.post(ctx, path, body, heartbeat)
-		if out.kind != outcomeTransient || attempt == maxAttempts-1 {
+		if (out.kind != outcomeTransient && out.kind != outcomeThrottled) || attempt == maxAttempts-1 {
 			break
 		}
-		delay := p.cfg.backoff(attempt)
+		delay := out.wait
+		if out.kind == outcomeTransient {
+			delay = p.cfg.backoff(attempt)
+		}
 		if nextTick > 0 && delay >= nextTick {
 			break
 		}

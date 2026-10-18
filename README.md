@@ -47,11 +47,12 @@ recommended production setup. It starts three publishers:
 | Publisher | What it sends | Cadence |
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5s after READY, then every 5 min, debounced (20s) on guild join/leave |
-| Heartbeat | per-shard status, latency and guild counts | every ~30s, plus 1s after any shard connects, resumes or drops |
+| Heartbeat | per-shard status, latency and guild counts | every 30–35s, plus once when a shard connects, resumes or drops (at least 10s after the previous beat) |
 | Commands | your registered global slash commands | once, ~10s after READY |
 
 Your **stats token** is on the listing's manage page, under the API tab. It is
 scoped to one listing, so it is the only credential this package needs.
+Surrounding whitespace and a pasted `Bearer ` prefix are stripped.
 
 `Autopost` is safe to call before or after `session.Open()`. The bot id is read
 from READY, and the server count from `session.State`. With an empty token it
@@ -127,7 +128,7 @@ thediscordlist.Autopost(session, token,
 	thediscordlist.WithBaseURL("https://thediscordlist.com/api"),
 
 	thediscordlist.WithStatsInterval(5*time.Minute),
-	thediscordlist.WithHeartbeatInterval(30*time.Second), // retuned from the API's response
+	thediscordlist.WithHeartbeatInterval(30*time.Second), // 15–60s, retuned from the API's response
 	thediscordlist.WithPostEmptyCommands(),               // an empty list CLEARS the listing
 
 	thediscordlist.WithoutStats(),
@@ -207,8 +208,10 @@ http.Handle("/webhooks/tdl", webhooks.NewHandler(os.Getenv("TDL_WEBHOOK_SECRET")
 gorilla/mux and `http.ServeMux`, and through `gin.WrapH` or `echo.WrapHandler`.
 It answers `204` when your function returns nil, `500` when it returns an error
 or panics (so the delivery is retried), `202` when it overruns the 8-second
-budget (the work carries on, `ctx` is not cancelled), and `400` when
-verification fails. Set `Tolerance`, `Timeout` and `OnError` on the returned
+budget (the work carries on, `ctx` is not cancelled), `401` for a missing or
+invalid signature, `400` for any other verification failure, and `413` for a
+body over 1 MiB. An empty secret never verifies: every delivery answers `500`
+until it is set. Set `Tolerance`, `Timeout` and `OnError` on the returned
 `*Handler` to tune it.
 
 ### Verifying by hand
@@ -218,8 +221,8 @@ body, _ := io.ReadAll(r.Body)
 event, err := webhooks.Verify(body, r.Header.Get(webhooks.SignatureHeader), secret)
 var verr *webhooks.Error
 if errors.As(err, &verr) {
-	// verr.Code: MISSING_SIGNATURE, MALFORMED_SIGNATURE, STALE_TIMESTAMP,
-	// INVALID_SIGNATURE or MALFORMED_BODY
+	// verr.Code: MISSING_SECRET, MISSING_SIGNATURE, MALFORMED_SIGNATURE,
+	// STALE_TIMESTAMP, INVALID_SIGNATURE or MALFORMED_BODY
 }
 ```
 
@@ -233,6 +236,7 @@ tolerance and clock.
 | `event.Event` | Fires for | Decode `event.Data` into |
 | --- | --- | --- |
 | `listing.bumped` | servers, bots | `webhooks.Bumped` |
+| `listing.bump_ready` | servers, bots | `webhooks.BumpReady` |
 | `listing.upvoted` | servers, bots | `webhooks.Upvoted` |
 | `server.joined` | servers only | `webhooks.ServerJoined` |
 | `bot.added` | bots | `webhooks.BotAdded` |
@@ -269,11 +273,16 @@ send time; never use it for freshness.
   suspends and reprobes every 30 minutes rather than disabling: the plan is
   checked per request, so a bot can gain it mid-run.
 - **Rate limits are shared.** The API counts stats and commands against one
-  budget keyed by client IP (60/min; heartbeats have their own 120/min). On a
-  `429` this package honours `Retry-After` and `X-RateLimit-Reset` with one
-  client-wide suspension for stats and commands; heartbeats bypass it — a stale
-  number beats a false "down" on your status page. On shared hosting, other
-  bots behind the same egress IP count against you.
+  budget per bot (60/min; heartbeats have their own 120/min). On a
+  `429` this package honours `Retry-After` and `X-RateLimit-Reset` (default
+  60s, at most an hour) with one client-wide suspension for stats and commands;
+  heartbeats bypass it — a stale number beats a false "down" on your status
+  page.
+- **Retries never outrun the next tick.** A network error, `408`, `425` or
+  `5xx` is retried up to 3 attempts with backoff, and a `429` once its wait has
+  passed, unless the publisher's next tick comes first. Any other `4xx` is
+  reported once and not retried. A manual `PostX` waits for its retries, so
+  pass a `ctx` with a deadline to bound it.
 - **A `401` disables every publisher**: the token is wrong for all of them.
 - **`404` never means "bad token".** It means the id is unknown or belongs to a
   server listing. The distinction is deliberate, so probing cannot enumerate.
