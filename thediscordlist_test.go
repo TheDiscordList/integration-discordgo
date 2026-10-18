@@ -327,6 +327,8 @@ func TestStatusHandling(t *testing.T) {
 		{"409 disables commands", KindCommands, []int{409}, Result{Status: 409}, 1, map[Kind]string{KindCommands: "conflict"}, 0},
 		{"422 is reported and stays enabled", KindStats, []int{422}, Result{Status: 422}, 1, map[Kind]string{}, 1},
 		{"5xx is retried", KindStats, []int{502, 500, 200}, Result{OK: true, Status: 200}, 3, map[Kind]string{}, 0},
+		{"408 and 425 are retried", KindStats, []int{408, 425, 200}, Result{OK: true, Status: 200}, 3, map[Kind]string{}, 0},
+		{"other 4xx is reported, not retried", KindStats, []int{413}, Result{Status: 413}, 1, map[Kind]string{}, 1},
 		{"5xx gives up after three attempts", KindHeartbeat, []int{503, 503, 503}, Result{Status: 503}, 3, map[Kind]string{}, 1},
 	}
 	for _, tt := range tests {
@@ -405,13 +407,15 @@ func TestRateLimitSuspension(t *testing.T) {
 		{"X-RateLimit-Reset wins when later", map[string]string{
 			"Retry-After": "5", "X-RateLimit-Reset": strconv.FormatInt(time.Now().Add(10*time.Minute).Unix(), 10),
 		}, 9 * time.Minute, 11 * time.Minute},
+		{"capped at an hour", map[string]string{"Retry-After": "86400"}, time.Hour, time.Hour + 3*time.Second},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newFakeAPI(t)
 			f.commands = `[{"type":1,"name":"ping","description":"Pong"}]`
 			f.queue("stats", reply{status: 429, header: tt.header, body: "{}"})
-			p := Autopost(newSession(t, f, 0, 1, "g1"), "tok", testOptions(f)...)
+			// Every wait outlasts the next tick, so the 429 is not retried.
+			p := Autopost(newSession(t, f, 0, 1, "g1"), "tok", testOptions(f, func(c *config) { c.statsInterval = 30 * time.Second })...)
 			prime(p)
 
 			if res := p.PostStats(context.Background()); res != (Result{Status: 429, Skipped: "throttled"}) {
@@ -435,6 +439,20 @@ func TestRateLimitSuspension(t *testing.T) {
 				t.Errorf("PostHeartbeat = %+v, want sent", res)
 			}
 		})
+	}
+}
+
+func TestRateLimitIsRetriedBeforeTheNextTick(t *testing.T) {
+	f := newFakeAPI(t)
+	f.queue("stats", reply{status: 429, header: map[string]string{"Retry-After": "0.01"}, body: "{}"})
+	p := Autopost(newSession(t, f, 0, 1, "g1"), "tok", testOptions(f, WithoutHeartbeat())...)
+	prime(p)
+
+	if res := p.PostStats(context.Background()); !res.OK {
+		t.Fatalf("PostStats = %+v, want sent once the wait passed", res)
+	}
+	if n := len(f.requests("stats")); n != 2 {
+		t.Fatalf("stats requests = %d, want 2", n)
 	}
 }
 

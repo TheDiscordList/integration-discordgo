@@ -273,10 +273,16 @@ send time; never use it for freshness.
   checked per request, so a bot can gain it mid-run.
 - **Rate limits are shared.** The API counts stats and commands against one
   budget keyed by client IP (60/min; heartbeats have their own 120/min). On a
-  `429` this package honours `Retry-After` and `X-RateLimit-Reset` with one
-  client-wide suspension for stats and commands; heartbeats bypass it — a stale
-  number beats a false "down" on your status page. On shared hosting, other
-  bots behind the same egress IP count against you.
+  `429` this package honours `Retry-After` and `X-RateLimit-Reset` (default
+  60s, at most an hour) with one client-wide suspension for stats and commands;
+  heartbeats bypass it — a stale number beats a false "down" on your status
+  page. On shared hosting, other bots behind the same egress IP count against
+  you.
+- **Retries never outrun the next tick.** A network error, `408`, `425` or
+  `5xx` is retried up to 3 attempts with backoff, and a `429` once its wait has
+  passed, unless the publisher's next tick comes first. Any other `4xx` is
+  reported once and not retried. A manual `PostX` waits for its retries, so
+  pass a `ctx` with a deadline to bound it.
 - **A `401` disables every publisher**: the token is wrong for all of them.
 - **`404` never means "bad token".** It means the id is unknown or belongs to a
   server listing. The distinction is deliberate, so probing cannot enumerate.

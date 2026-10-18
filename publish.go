@@ -31,6 +31,7 @@ const (
 	requestTimeout = 10 * time.Second
 	maxAttempts    = 3
 	maxLatency     = 10 * time.Minute
+	maxThrottle    = time.Hour
 )
 
 func (p *Poster) scheduleLocked(pub *publisher, d time.Duration, run func(context.Context)) {
@@ -110,8 +111,7 @@ func (p *Poster) guildChangedLocked() {
 	if p.debounceCap.IsZero() {
 		p.debounceCap = now.Add(p.cfg.statsMinGap)
 	}
-	at := min(now.Add(p.cfg.statsDebounce).UnixNano(), p.debounceCap.UnixNano())
-	p.scheduleLocked(p.stats, time.Duration(at-now.UnixNano()), p.tickStats)
+	p.scheduleLocked(p.stats, min(p.cfg.statsDebounce, p.debounceCap.Sub(now)), p.tickStats)
 }
 
 func (p *Poster) tickStats(ctx context.Context)     { p.publishStats(ctx, false) }
@@ -325,16 +325,20 @@ func (p *Poster) publishCommands(ctx context.Context) Result {
 	return res
 }
 
-// send retries transient failures only. A backoff that would outlast the
-// publisher's next tick is dropped: the next tick carries fresher data.
+// send retries transient failures after a backoff and a 429 after its wait.
+// A delay that would outlast the publisher's next tick is dropped: the next
+// tick carries fresher data.
 func (p *Poster) send(ctx context.Context, pub *publisher, path string, body any, heartbeat bool, nextTick time.Duration) (Result, []byte) {
 	var out outcome
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		out = p.api.post(ctx, path, body, heartbeat)
-		if out.kind != outcomeTransient || attempt == maxAttempts-1 {
+		if (out.kind != outcomeTransient && out.kind != outcomeThrottled) || attempt == maxAttempts-1 {
 			break
 		}
-		delay := p.cfg.backoff(attempt)
+		delay := out.wait
+		if out.kind == outcomeTransient {
+			delay = p.cfg.backoff(attempt)
+		}
 		if nextTick > 0 && delay >= nextTick {
 			break
 		}

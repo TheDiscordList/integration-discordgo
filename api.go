@@ -35,6 +35,8 @@ type outcome struct {
 	status int
 	body   []byte
 	err    error
+	// wait is how long a 429 asked the client to back off.
+	wait time.Duration
 }
 
 // apiClient is shared by every publisher. The server keeps one rate-limit
@@ -107,29 +109,30 @@ func (c *apiClient) post(ctx context.Context, path string, payload any, heartbea
 
 	out := classify(resp.StatusCode, body)
 	if out.kind == outcomeThrottled {
-		c.suspend(resp.Header)
+		out.wait = c.suspend(resp.Header)
 	}
 	return out
 }
 
-func (c *apiClient) suspend(h http.Header) {
+// suspend honours Retry-After and X-RateLimit-Reset, whichever is later, up
+// to an hour. The deadline is taken from time.Now so it stays monotonic.
+func (c *apiClient) suspend(h http.Header) time.Duration {
 	wait := time.Minute
 	if seconds, err := strconv.ParseFloat(h.Get("Retry-After"), 64); err == nil && seconds > 0 {
-		wait = time.Duration(seconds * float64(time.Second))
+		wait = time.Duration(min(seconds, maxThrottle.Seconds()) * float64(time.Second))
 	}
-	until := time.Now().Add(wait)
 	if reset, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); err == nil && reset > 0 {
-		if at := time.Unix(reset, 0); at.After(until) {
-			until = at
-		}
+		wait = max(wait, time.Until(time.Unix(reset, 0)))
 	}
-	until = until.Add(time.Duration(rand.Int64N(int64(2 * time.Second))))
+	wait = min(wait, maxThrottle) + time.Duration(rand.Int64N(int64(2*time.Second)))
+	until := time.Now().Add(wait)
 
 	c.mu.Lock()
 	if until.After(c.suspendedUntil) {
 		c.suspendedUntil = until
 	}
 	c.mu.Unlock()
+	return wait
 }
 
 // classify mirrors the server's precedence 404 → 429 → 401 → 422 → 403/409.
@@ -145,10 +148,11 @@ func classify(status int, body []byte) outcome {
 		return outcome{kind: outcomePlan, status: status}
 	case status == http.StatusNotFound, status == http.StatusConflict:
 		return outcome{kind: outcomeConfig, status: status}
-	case status == http.StatusBadRequest, status == http.StatusUnprocessableEntity:
-		return outcome{kind: outcomePayload, status: status}
 	case status == http.StatusTooManyRequests:
 		return outcome{kind: outcomeThrottled, status: status}
+	// Every other 4xx would fail the same way again, except a timeout or "too early".
+	case status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != http.StatusTooEarly:
+		return outcome{kind: outcomePayload, status: status}
 	default:
 		return outcome{kind: outcomeTransient, status: status, err: fmt.Errorf("TheDiscordList responded %d", status)}
 	}
