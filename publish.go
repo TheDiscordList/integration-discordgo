@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
-	"strconv"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -293,65 +292,7 @@ func (p *Poster) beat(ctx context.Context, manual bool) Result {
 }
 
 type commandsBody struct {
-	Commands []wireCommand `json:"commands"`
-}
-
-// wireCommand is the subset of a Discord application command the API takes.
-// discordgo's own structs marshal absent options as null, which is a 422.
-type wireCommand struct {
-	Type                     int          `json:"type,omitempty"`
-	Name                     string       `json:"name"`
-	Description              string       `json:"description,omitempty"`
-	NSFW                     *bool        `json:"nsfw,omitempty"`
-	DefaultMemberPermissions *string      `json:"default_member_permissions,omitempty"`
-	Options                  []wireOption `json:"options,omitempty"`
-}
-
-type wireOption struct {
-	Type        int          `json:"type"`
-	Name        string       `json:"name"`
-	Description string       `json:"description"`
-	Required    bool         `json:"required,omitempty"`
-	Choices     []wireChoice `json:"choices,omitempty"`
-	Options     []wireOption `json:"options,omitempty"`
-}
-
-type wireChoice struct {
-	Name  string `json:"name"`
-	Value any    `json:"value"`
-}
-
-func toWireCommands(cmds []*discordgo.ApplicationCommand) []wireCommand {
-	out := make([]wireCommand, 0, len(cmds))
-	for _, c := range cmds {
-		if c == nil {
-			continue
-		}
-		w := wireCommand{Type: int(c.Type), Name: c.Name, Description: c.Description, NSFW: c.NSFW, Options: toWireOptions(c.Options)}
-		if c.DefaultMemberPermissions != nil {
-			perms := strconv.FormatInt(*c.DefaultMemberPermissions, 10)
-			w.DefaultMemberPermissions = &perms
-		}
-		out = append(out, w)
-	}
-	return out
-}
-
-func toWireOptions(opts []*discordgo.ApplicationCommandOption) []wireOption {
-	var out []wireOption
-	for _, o := range opts {
-		if o == nil {
-			continue
-		}
-		w := wireOption{Type: int(o.Type), Name: o.Name, Description: o.Description, Required: o.Required, Options: toWireOptions(o.Options)}
-		for _, c := range o.Choices {
-			if c != nil {
-				w.Choices = append(w.Choices, wireChoice{Name: c.Name, Value: c.Value})
-			}
-		}
-		out = append(out, w)
-	}
-	return out
+	Commands []*discordgo.ApplicationCommand `json:"commands"`
 }
 
 func (p *Poster) publishCommands(ctx context.Context) Result {
@@ -380,7 +321,7 @@ func (p *Poster) publishCommands(ctx context.Context) Result {
 	if len(cmds) == 0 && !p.cfg.postEmpty {
 		return Result{Skipped: "empty"}
 	}
-	res, _ := p.send(ctx, pub, "/bots/"+botID+"/commands", commandsBody{toWireCommands(cmds)}, false, 0)
+	res, _ := p.send(ctx, pub, "/bots/"+botID+"/commands", commandsBody{cmds}, false, 0)
 	return res
 }
 
