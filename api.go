@@ -39,9 +39,8 @@ type outcome struct {
 	wait time.Duration
 }
 
-// apiClient is shared by every publisher. The server keeps one rate-limit
-// counter per client IP across all bot routes, so a 429 suspends stats and
-// commands together. Heartbeats bypass the suspension: a dropped stats post is
+// apiClient is shared by every publisher. The server counts stats and
+// commands against one per-bot budget, so a 429 suspends them together. Heartbeats bypass the suspension: a dropped stats post is
 // a stale number, a dropped heartbeat is a false "down" on the status page.
 type apiClient struct {
 	http      *http.Client

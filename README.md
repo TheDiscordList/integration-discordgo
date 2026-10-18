@@ -273,12 +273,11 @@ send time; never use it for freshness.
   suspends and reprobes every 30 minutes rather than disabling: the plan is
   checked per request, so a bot can gain it mid-run.
 - **Rate limits are shared.** The API counts stats and commands against one
-  budget keyed by client IP (60/min; heartbeats have their own 120/min). On a
+  budget per bot (60/min; heartbeats have their own 120/min). On a
   `429` this package honours `Retry-After` and `X-RateLimit-Reset` (default
   60s, at most an hour) with one client-wide suspension for stats and commands;
   heartbeats bypass it — a stale number beats a false "down" on your status
-  page. On shared hosting, other bots behind the same egress IP count against
-  you.
+  page.
 - **Retries never outrun the next tick.** A network error, `408`, `425` or
   `5xx` is retried up to 3 attempts with backoff, and a `429` once its wait has
   passed, unless the publisher's next tick comes first. Any other `4xx` is
