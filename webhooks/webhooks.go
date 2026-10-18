@@ -33,6 +33,7 @@ const (
 // Event names sent today. Unknown names still parse: always answer 2xx for them.
 const (
 	EventListingBumped    = "listing.bumped"
+	EventListingBumpReady = "listing.bump_ready"
 	EventListingUpvoted   = "listing.upvoted"
 	EventServerJoined     = "server.joined" // server listings only
 	EventBotAdded         = "bot.added"
@@ -95,6 +96,12 @@ type Bumped struct {
 	BumpedAt   time.Time `json:"bumped_at"`
 	NextBumpAt time.Time `json:"next_bump_at"`
 	User       *User     `json:"user"`
+}
+
+// BumpReady is the data of listing.bump_ready, sent once when the bump
+// cooldown lifts.
+type BumpReady struct {
+	ReadyAt time.Time `json:"ready_at"`
 }
 
 // Upvoted is the data of listing.upvoted.

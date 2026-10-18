@@ -111,6 +111,22 @@ func TestUnknownEventParses(t *testing.T) {
 	}
 }
 
+func TestBumpReadyParses(t *testing.T) {
+	body := `{"id":"d4","event":"listing.bump_ready","created_at":"2026-10-18T12:00:00+00:00",` +
+		`"listing":{"id":"9","type":"server","name":"S","url":"https://thediscordlist.com/servers/9"},` +
+		`"data":{"ready_at":"2026-10-18T12:00:00+00:00"}}`
+	now := time.Now()
+	event, err := VerifyAt([]byte(body), "t="+strconv.FormatInt(now.Unix(), 10)+",v1="+sign("s", now.Unix(), body), "s", DefaultTolerance, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ready BumpReady
+	if err := json.Unmarshal(event.Data, &ready); err != nil || event.Event != EventListingBumpReady ||
+		!ready.ReadyAt.Equal(time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("event = %+v, data = %+v, err = %v", event, ready, err)
+	}
+}
+
 func TestHandlerRefusesAnEmptySecret(t *testing.T) {
 	h := NewHandler("", func(context.Context, *Event, Delivery) error {
 		t.Error("OnEvent ran without a secret")

@@ -235,6 +235,7 @@ tolerance and clock.
 | `event.Event` | Fires for | Decode `event.Data` into |
 | --- | --- | --- |
 | `listing.bumped` | servers, bots | `webhooks.Bumped` |
+| `listing.bump_ready` | servers, bots | `webhooks.BumpReady` |
 | `listing.upvoted` | servers, bots | `webhooks.Upvoted` |
 | `server.joined` | servers only | `webhooks.ServerJoined` |
 | `bot.added` | bots | `webhooks.BotAdded` |
