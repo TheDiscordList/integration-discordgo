@@ -5,6 +5,22 @@ tags; see "Publishing" in the README.
 
 ## Unreleased
 
+## 0.2.0 - 2026-10-18
+
+- `webhooks.Verify` and the `Handler` fail closed on an empty secret, with the
+  new `MISSING_SECRET` code; the handler answers `500` until a secret is set.
+- The webhook `Handler` answers `401` instead of `400` for a missing or invalid
+  signature.
+- `listing.bump_ready` webhook event: `EventListingBumpReady` and `BumpReady`.
+- Commands are forwarded as discordgo decodes them instead of being rebuilt.
+- `408` and `425` are retried like `5xx`; every other `4xx` is reported and not
+  retried. A `429` is retried once its wait has passed if that comes before the
+  next tick, and its suspension is capped at an hour.
+- Out-of-band heartbeats on shard transitions wait until at least 10 seconds
+  after the previous beat, instead of firing after 1 second.
+- `WithHeartbeatInterval` is clamped to 15–60 seconds.
+- A pasted `Bearer ` prefix on the stats token is stripped.
+
 ## 0.1.0 - 2026-10-16
 
 - `Autopost` and `AutopostShards`: server count, per-shard heartbeats and
