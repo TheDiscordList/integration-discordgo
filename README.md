@@ -207,8 +207,10 @@ http.Handle("/webhooks/tdl", webhooks.NewHandler(os.Getenv("TDL_WEBHOOK_SECRET")
 gorilla/mux and `http.ServeMux`, and through `gin.WrapH` or `echo.WrapHandler`.
 It answers `204` when your function returns nil, `500` when it returns an error
 or panics (so the delivery is retried), `202` when it overruns the 8-second
-budget (the work carries on, `ctx` is not cancelled), and `400` when
-verification fails. Set `Tolerance`, `Timeout` and `OnError` on the returned
+budget (the work carries on, `ctx` is not cancelled), `401` for a missing or
+invalid signature, `400` for any other verification failure, and `413` for a
+body over 1 MiB. An empty secret never verifies: every delivery answers `500`
+until it is set. Set `Tolerance`, `Timeout` and `OnError` on the returned
 `*Handler` to tune it.
 
 ### Verifying by hand
@@ -218,8 +220,8 @@ body, _ := io.ReadAll(r.Body)
 event, err := webhooks.Verify(body, r.Header.Get(webhooks.SignatureHeader), secret)
 var verr *webhooks.Error
 if errors.As(err, &verr) {
-	// verr.Code: MISSING_SIGNATURE, MALFORMED_SIGNATURE, STALE_TIMESTAMP,
-	// INVALID_SIGNATURE or MALFORMED_BODY
+	// verr.Code: MISSING_SECRET, MISSING_SIGNATURE, MALFORMED_SIGNATURE,
+	// STALE_TIMESTAMP, INVALID_SIGNATURE or MALFORMED_BODY
 }
 ```
 

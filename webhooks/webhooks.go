@@ -44,6 +44,8 @@ const (
 type ErrorCode string
 
 const (
+	// MissingSecret is a configuration error: an empty secret never verifies.
+	MissingSecret      ErrorCode = "MISSING_SECRET"
 	MissingSignature   ErrorCode = "MISSING_SIGNATURE"
 	MalformedSignature ErrorCode = "MALFORMED_SIGNATURE"
 	StaleTimestamp     ErrorCode = "STALE_TIMESTAMP"
@@ -139,6 +141,9 @@ func Verify(body []byte, signatureHeader, secret string) (*Event, error) {
 
 // VerifyAt is [Verify] with an explicit tolerance and clock.
 func VerifyAt(body []byte, signatureHeader, secret string, tolerance time.Duration, now time.Time) (*Event, error) {
+	if strings.TrimSpace(secret) == "" {
+		return nil, &Error{MissingSecret, "no webhook secret configured"}
+	}
 	if signatureHeader == "" {
 		return nil, &Error{MissingSignature, "missing " + SignatureHeader + " header"}
 	}
@@ -197,8 +202,9 @@ type Delivery struct {
 
 // Handler is an http.Handler that verifies each delivery and passes it to
 // OnEvent. It answers 204 when OnEvent returns nil, 500 when it fails or
-// panics (so the delivery is retried), 202 when it overruns Timeout (the work
-// carries on), and 400 when verification fails.
+// panics (so the delivery is retried) or Secret is empty, 202 when it overruns
+// Timeout (the work carries on), 401 for a missing or invalid signature and
+// 400 for any other verification failure.
 type Handler struct {
 	Secret string
 	// OnEvent must return nil for event names it does not handle.
@@ -242,7 +248,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	event, err := VerifyAt(body, r.Header.Get(SignatureHeader), h.Secret, tolerance, time.Now())
 	if err != nil {
 		h.report(err)
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(verifyStatus(err))
 		return
 	}
 	if h.OnEvent == nil {
@@ -286,6 +292,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case <-timer.C:
 		w.WriteHeader(http.StatusAccepted)
 	}
+}
+
+func verifyStatus(err error) int {
+	var verr *Error
+	if errors.As(err, &verr) {
+		switch verr.Code {
+		case MissingSecret:
+			return http.StatusInternalServerError
+		case MissingSignature, InvalidSignature:
+			return http.StatusUnauthorized
+		}
+	}
+	return http.StatusBadRequest
 }
 
 func (h *Handler) report(err error) {
