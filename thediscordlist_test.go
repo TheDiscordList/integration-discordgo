@@ -254,9 +254,38 @@ func TestHeartbeatPayload(t *testing.T) {
 	}
 	want := `{"cluster":0,"cluster_count":1,"shards":[` +
 		`{"id":0,"status":"ready","latency_ms":42,"guilds":2},` +
-		`{"id":1,"status":"connecting","guilds":0}]}`
+		`{"id":1,"status":"connecting"}]}`
 	if r.body != want {
 		t.Errorf("body = %s\nwant   %s", r.body, want)
+	}
+}
+
+func TestShardGuildsWaitForReady(t *testing.T) {
+	f := newFakeAPI(t)
+	p := Autopost(newSession(t, f, 0, 1, "g1"), "tok", testOptions(f, WithBotID("123"), WithoutStats(), WithoutCommands())...)
+	defer p.Stop()
+	sh := p.shards[0]
+	guilds := func() *int {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.collectShardsLocked()[0].Guilds
+	}
+
+	if guilds() != nil {
+		t.Error("a booting shard reported guilds")
+	}
+	// discordgo emits Connect even when the gateway's first packet is not READY.
+	p.onStatus(sh, "ready")
+	if guilds() != nil {
+		t.Error("a shard reported guilds before its READY")
+	}
+	p.onReady(sh, &discordgo.Ready{User: &discordgo.User{ID: "123"}})
+	if n := guilds(); n == nil || *n != 1 {
+		t.Errorf("guilds after READY = %v, want 1", n)
+	}
+	p.onStatus(sh, "connecting")
+	if guilds() != nil {
+		t.Error("a reconnecting shard reported guilds")
 	}
 }
 

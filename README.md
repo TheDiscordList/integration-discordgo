@@ -291,7 +291,8 @@ send time; never use it for freshness.
   comes back or Discord says the bot left.
 - **`session.StateEnabled` must stay on**, or the guild cache is empty. With
   it off, pass `WithServerCount`; per-shard guild counts are then omitted from
-  heartbeats.
+  heartbeats. They are also omitted while a shard is not ready, so a restart
+  cannot publish a false 0.
 - Without `discordgo.IntentsGuilds`, join and leave events never arrive and the
   count only moves on the next READY. The package warns once.
 - Shard latency comes from `session.HeartbeatLatency()` and is omitted until

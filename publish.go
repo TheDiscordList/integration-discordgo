@@ -242,7 +242,8 @@ func (p *Poster) collectShardsLocked() []shardReport {
 			ms := int(latency.Milliseconds())
 			report.LatencyMS = &ms
 		}
-		if n, ok := sh.guilds(); ok {
+		// State is empty until READY, and the API reads a 0 as the bot's real count.
+		if n, ok := sh.guilds(); ok && sh.everReady && sh.status == "ready" {
 			report.Guilds = &n
 		}
 		reports = append(reports, report)
