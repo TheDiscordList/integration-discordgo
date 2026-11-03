@@ -107,7 +107,8 @@ func WithBaseURL(url string) Option {
 // so a booting bot reads "connecting" rather than down.
 func WithBotID(id string) Option { return func(c *config) { c.botID = id } }
 
-// WithStatsInterval sets the stats cadence. Default 5 minutes.
+// WithStatsInterval sets the stats cadence, never below a minute. Default 5
+// minutes.
 func WithStatsInterval(d time.Duration) Option { return func(c *config) { c.statsInterval = d } }
 
 // WithHeartbeatInterval sets the starting heartbeat cadence, clamped to 15–60
@@ -246,6 +247,8 @@ func AutopostShards(sessions []*discordgo.Session, token string, opts ...Option)
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	// An unchanged count reschedules at this interval, so 0 would spin a core.
+	cfg.statsInterval = max(cfg.statsInterval, cfg.statsMinGap)
 
 	p := &Poster{cfg: cfg, warned: map[string]bool{}, lastCount: -1,
 		beatInterval: min(max(cfg.heartbeatInterval, heartbeatMin), heartbeatMax)}

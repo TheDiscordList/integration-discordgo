@@ -688,6 +688,15 @@ func TestManualPostRearms(t *testing.T) {
 	}
 }
 
+func TestStatsIntervalHasAFloor(t *testing.T) {
+	f := newFakeAPI(t)
+	p := Autopost(newSession(t, f, 0, 1), "tok", WithBaseURL(f.srv.URL), WithLogger(quietLogger), WithStatsInterval(0))
+	defer p.Stop()
+	if p.cfg.statsInterval != statsMinGap {
+		t.Fatalf("interval = %v, want %v", p.cfg.statsInterval, statsMinGap)
+	}
+}
+
 func TestStatsMinGapAndUnchanged(t *testing.T) {
 	f := newFakeAPI(t)
 	s := newSession(t, f, 0, 1, "g1")
