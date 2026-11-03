@@ -147,6 +147,26 @@ func TestHandlerRefusesAnEmptySecret(t *testing.T) {
 	}
 }
 
+func TestPanickingOnErrorIsContained(t *testing.T) {
+	for name, onEvent := range map[string]func(context.Context, *Event, Delivery) error{
+		"OnEvent fails":  func(context.Context, *Event, Delivery) error { return errors.New("database down") },
+		"OnEvent panics": func(context.Context, *Event, Delivery) error { panic("boom") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := NewHandler(vectorSecret, onEvent)
+			h.OnError = func(error) { panic("boom") }
+			now := time.Now().Unix()
+			req := httptest.NewRequest(http.MethodPost, "/webhooks/tdl", strings.NewReader(vectorBody))
+			req.Header.Set(SignatureHeader, "t="+strconv.FormatInt(now, 10)+",v1="+sign(vectorSecret, now, vectorBody))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500", rec.Code)
+			}
+		})
+	}
+}
+
 func TestHandler(t *testing.T) {
 	signed := func(body string) http.Header {
 		now := time.Now().Unix()
