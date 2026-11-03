@@ -165,8 +165,8 @@ func (p *Poster) publishStats(ctx context.Context, manual bool) Result {
 		return Result{Skipped: "unmeasurable"}
 	}
 	shardCount := p.topo.shardCount
-	// Every stats post re-indexes the listing and fires a webhook even when
-	// nothing moved, and the server does not dedupe, so the skip lives here.
+	// The server treats an unchanged count as a no-op, so re-sending one only
+	// spends rate budget.
 	if count == p.lastCount && shardCount == p.lastShardCount && time.Now().Before(p.lastPostAt.Add(statsForceAfter)) {
 		p.scheduleLocked(pub, p.cfg.statsInterval, p.tickStats)
 		p.mu.Unlock()
