@@ -56,7 +56,11 @@ type apiClient struct {
 
 func newAPIClient(baseURL, token string) *apiClient {
 	return &apiClient{
-		http:      &http.Client{Timeout: requestTimeout},
+		http: &http.Client{
+			Timeout: requestTimeout,
+			// Following one turns the POST into a GET, whose 200 would read as posted.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		baseURL:   baseURL,
 		token:     token,
 		userAgent: "TheDiscordList-discordgo/" + moduleVersion() + " (+https://" + modulePath + ")",

@@ -417,6 +417,7 @@ func TestStatusHandling(t *testing.T) {
 		{"409 disables commands", KindCommands, []int{409}, Result{Status: 409}, 1, map[Kind]string{KindCommands: "conflict"}, 0},
 		{"422 is reported and stays enabled", KindStats, []int{422}, Result{Status: 422}, 1, map[Kind]string{}, 1},
 		{"5xx is retried", KindStats, []int{502, 500, 200}, Result{OK: true, Status: 200}, 3, map[Kind]string{}, 0},
+		{"a redirect is not followed", KindStats, []int{302, 302, 302}, Result{Status: 302}, 3, map[Kind]string{}, 1},
 		{"408 and 425 are retried", KindStats, []int{408, 425, 200}, Result{OK: true, Status: 200}, 3, map[Kind]string{}, 0},
 		{"other 4xx is reported, not retried", KindStats, []int{413}, Result{Status: 413}, 1, map[Kind]string{}, 1},
 		{"5xx gives up after three attempts", KindHeartbeat, []int{503, 503, 503}, Result{Status: 503}, 3, map[Kind]string{}, 1},
