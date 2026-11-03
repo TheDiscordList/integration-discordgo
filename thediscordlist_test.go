@@ -531,6 +531,28 @@ func TestRateLimitSuspension(t *testing.T) {
 	}
 }
 
+func TestHeartbeatRateLimitLeavesStatsAndCommandsAlone(t *testing.T) {
+	f := newFakeAPI(t)
+	f.commands = `[{"type":1,"name":"ping","description":"Pong"}]`
+	f.queue("heartbeat", reply{status: 429, header: map[string]string{"Retry-After": "120"}, body: "{}"})
+	p := Autopost(newSession(t, f, 0, 1, "g1"), "tok", testOptions(f)...)
+	prime(p)
+
+	if res := p.PostHeartbeat(context.Background()); res != (Result{Status: 429, Skipped: "throttled"}) {
+		t.Fatalf("PostHeartbeat = %+v", res)
+	}
+	// The wait outlasts the next beat, so it is not retried straight away either.
+	if n := len(f.requests("heartbeat")); n != 1 {
+		t.Fatalf("heartbeat requests = %d, want 1", n)
+	}
+	if res := p.PostStats(context.Background()); !res.OK {
+		t.Errorf("PostStats = %+v, want sent", res)
+	}
+	if res := p.PostCommands(context.Background()); !res.OK {
+		t.Errorf("PostCommands = %+v, want sent", res)
+	}
+}
+
 func TestRateLimitIsRetriedBeforeTheNextTick(t *testing.T) {
 	f := newFakeAPI(t)
 	f.queue("stats", reply{status: 429, header: map[string]string{"Retry-After": "0.01"}, body: "{}"})
