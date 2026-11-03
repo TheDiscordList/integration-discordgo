@@ -178,6 +178,10 @@ nothing was sent, which is usually correct rather than a failure.
 An explicit `PostX` also re-arms a publisher that disabled itself, so you can
 retry after fixing a token or a listing id without restarting.
 
+Call `Stop` when you close the session. discordgo has no terminal shutdown
+signal: `Disconnect` also fires on every reconnect, so a `Poster` cannot stop
+itself, and it would keep reporting the shard as connecting.
+
 ## Webhooks
 
 ```go
