@@ -32,8 +32,13 @@ const (
 	planReprobe    = 30 * time.Minute
 	requestTimeout = 10 * time.Second
 	maxAttempts    = 3
+	backoffBase    = time.Second
+	backoffMax     = 30 * time.Second
 	maxLatency     = 10 * time.Minute
-	maxThrottle    = time.Hour
+
+	defaultThrottle = time.Minute
+	maxThrottle     = time.Hour
+	throttleJitter  = 2 * time.Second
 )
 
 func (p *Poster) scheduleLocked(pub *publisher, d time.Duration, run func(context.Context)) {
@@ -248,7 +253,7 @@ func (p *Poster) collectShardsLocked() []shardReport {
 			report.LatencyMS = &ms
 		}
 		// State is empty until READY, and the API reads a 0 as the bot's real count.
-		if n, ok := sh.guilds(); ok && sh.everReady && sh.status == "ready" {
+		if n, ok := sh.guilds(); ok && sh.everReady && sh.status == shardReady {
 			report.Guilds = &n
 		}
 		reports = append(reports, report)

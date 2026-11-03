@@ -159,6 +159,14 @@ func OnDisabled(fn func(kind Kind, status int, reason string)) Option {
 	return func(c *config) { c.onDisabled = fn }
 }
 
+// The shard states this package sends. discordgo does not expose a resume in
+// progress, so the API's "resuming" never appears.
+const (
+	shardReady        = "ready"
+	shardConnecting   = "connecting"
+	shardDisconnected = "disconnected"
+)
+
 type shard struct {
 	session   *discordgo.Session
 	status    string
@@ -261,7 +269,7 @@ func AutopostShards(sessions []*discordgo.Session, token string, opts ...Option)
 	}
 	for _, s := range sessions {
 		if s != nil {
-			p.shards = append(p.shards, &shard{session: s, status: "connecting", outage: map[string]struct{}{}})
+			p.shards = append(p.shards, &shard{session: s, status: shardConnecting, outage: map[string]struct{}{}})
 		}
 	}
 	if len(p.shards) == 0 {
@@ -300,14 +308,14 @@ func AutopostShards(sessions []*discordgo.Session, token string, opts ...Option)
 		s := sh.session
 		p.detach = append(p.detach,
 			s.AddHandler(func(_ *discordgo.Session, e *discordgo.Ready) { p.onReady(sh, e) }),
-			s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Resumed) { p.onStatus(sh, "ready") }),
-			s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Connect) { p.onStatus(sh, "ready") }),
+			s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Resumed) { p.onStatus(sh, shardReady) }),
+			s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Connect) { p.onStatus(sh, shardReady) }),
 			s.AddHandler(func(s *discordgo.Session, _ *discordgo.Disconnect) {
 				// discordgo reconnects on its own unless told not to.
 				if s.ShouldReconnectOnError {
-					p.onStatus(sh, "connecting")
+					p.onStatus(sh, shardConnecting)
 				} else {
-					p.onStatus(sh, "disconnected")
+					p.onStatus(sh, shardDisconnected)
 				}
 			}),
 			s.AddHandler(func(_ *discordgo.Session, e *discordgo.GuildCreate) { p.onGuildCreate(sh, e) }),
@@ -377,7 +385,7 @@ func (p *Poster) inspectSessions() {
 		}
 		s.State.RLock()
 		if s.State.User != nil {
-			sh.status, sh.everReady = "ready", true
+			sh.status, sh.everReady = shardReady, true
 			if p.botID == "" {
 				p.botID = readyBotID(&s.State.Ready)
 			}
@@ -399,7 +407,7 @@ func readyBotID(r *discordgo.Ready) string {
 func (p *Poster) onReady(sh *shard, r *discordgo.Ready) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	sh.status, sh.everReady = "ready", true
+	sh.status, sh.everReady = shardReady, true
 	clear(sh.outage)
 	if p.botID == "" && r != nil {
 		p.botID = readyBotID(r)

@@ -121,14 +121,14 @@ func (c *apiClient) post(ctx context.Context, path string, payload any, heartbea
 // retryAfter honours Retry-After and X-RateLimit-Reset, whichever is later, up
 // to an hour.
 func retryAfter(h http.Header) time.Duration {
-	wait := time.Minute
+	wait := defaultThrottle
 	if seconds, err := strconv.ParseFloat(h.Get("Retry-After"), 64); err == nil && seconds > 0 {
 		wait = time.Duration(min(seconds, maxThrottle.Seconds()) * float64(time.Second))
 	}
 	if reset, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); err == nil && reset > 0 {
 		wait = max(wait, time.Until(time.Unix(reset, 0)))
 	}
-	return min(wait, maxThrottle) + time.Duration(rand.Int64N(int64(2*time.Second)))
+	return min(wait, maxThrottle) + time.Duration(rand.Int64N(int64(throttleJitter)))
 }
 
 // suspend takes its deadline from time.Now, so it stays monotonic.
@@ -167,6 +167,6 @@ func classify(status int, body []byte) outcome {
 
 // backoff is min(1s·2^attempt, 30s), scaled into its upper half at random.
 func backoff(attempt int) time.Duration {
-	d := min(time.Second<<attempt, 30*time.Second)
+	d := min(backoffBase<<attempt, backoffMax)
 	return time.Duration(float64(d) * (0.5 + rand.Float64()*0.5))
 }
