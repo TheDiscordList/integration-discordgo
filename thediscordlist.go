@@ -90,6 +90,7 @@ type config struct {
 	statsRemeasure    time.Duration
 	heartbeatInterval time.Duration
 	commandsDelay     time.Duration
+	commandsRetry     time.Duration
 	backoff           func(attempt int) time.Duration
 }
 
@@ -239,6 +240,7 @@ func AutopostShards(sessions []*discordgo.Session, token string, opts ...Option)
 		statsRemeasure:    statsRemeasure,
 		heartbeatInterval: heartbeatInterval,
 		commandsDelay:     commandsDelay,
+		commandsRetry:     commandsRetry,
 		backoff:           backoff,
 	}
 	for _, opt := range opts {

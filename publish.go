@@ -27,6 +27,7 @@ const (
 
 	// Offset from the first stats post: both share one server-side rate budget.
 	commandsDelay = 10 * time.Second
+	commandsRetry = 5 * time.Minute
 	// The Gold plan is checked per request, so a bot can gain it mid-run.
 	planReprobe    = 30 * time.Minute
 	requestTimeout = 10 * time.Second
@@ -88,7 +89,7 @@ func (p *Poster) startAllLocked() {
 		p.scheduleLocked(p.stats, p.cfg.statsFirstDelay, p.tickStats)
 	}
 	if p.commands != nil {
-		p.scheduleLocked(p.commands, p.cfg.commandsDelay, func(ctx context.Context) { p.publishCommands(ctx) })
+		p.scheduleLocked(p.commands, p.cfg.commandsDelay, p.tickCommands)
 	}
 }
 
@@ -118,6 +119,7 @@ func (p *Poster) guildChangedLocked() {
 
 func (p *Poster) tickStats(ctx context.Context)     { p.publishStats(ctx, false) }
 func (p *Poster) tickHeartbeat(ctx context.Context) { p.beat(ctx, false) }
+func (p *Poster) tickCommands(ctx context.Context)  { p.publishCommands(ctx) }
 
 type statsBody struct {
 	ServerCount int `json:"server_count"`
@@ -313,11 +315,13 @@ func (p *Poster) publishCommands(ctx context.Context) Result {
 	case disabled:
 		return Result{Skipped: "disabled"}
 	case suspended:
+		p.retryCommands()
 		return Result{Skipped: "plan"}
 	}
 
 	cmds, err := p.shards[0].session.ApplicationCommands(botID, "", discordgo.WithContext(ctx))
 	if err != nil {
+		p.retryCommands()
 		p.emitError(&Error{Kind: KindCommands, Err: fmt.Errorf("fetching commands from Discord: %w", err)})
 		return Result{Skipped: "fetch-failed"}
 	}
@@ -325,8 +329,18 @@ func (p *Poster) publishCommands(ctx context.Context) Result {
 	if len(cmds) == 0 && !p.cfg.postEmpty {
 		return Result{Skipped: "empty"}
 	}
-	res, _ := p.send(ctx, pub, "/bots/"+botID+"/commands", commandsBody{cmds}, false, 0)
+	res, _ := p.send(ctx, pub, "/bots/"+botID+"/commands", commandsBody{cmds}, false, p.cfg.commandsRetry)
 	return res
+}
+
+// retryCommands is the only cadence commands have: they post once on success,
+// because they change on deploy and a deploy is a restart.
+func (p *Poster) retryCommands() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.commands.disabled == "" {
+		p.scheduleLocked(p.commands, p.cfg.commandsRetry, p.tickCommands)
+	}
 }
 
 // send retries transient failures after a backoff and a 429 after its wait.
@@ -357,6 +371,18 @@ func (p *Poster) send(ctx context.Context, pub *publisher, path string, body any
 }
 
 func (p *Poster) react(pub *publisher, out outcome) Result {
+	if pub.kind == KindCommands {
+		switch out.kind {
+		case outcomeTransient, outcomeThrottled, outcomeDropped, outcomePlan:
+			p.retryCommands()
+		default:
+			p.mu.Lock()
+			if pub.timer != nil {
+				pub.timer.Stop()
+			}
+			p.mu.Unlock()
+		}
+	}
 	switch out.kind {
 	case outcomeOK:
 		p.emitPosted(pub.kind, out.status)

@@ -317,6 +317,66 @@ func TestCommandsAreForwarded(t *testing.T) {
 	}
 }
 
+func TestCommandsRetryUntilSuccessOrATerminal4xx(t *testing.T) {
+	retrying := func(f *fakeAPI) *Poster {
+		p := Autopost(newSession(t, f, 0, 1), "tok", testOptions(f, WithoutHeartbeat(), WithoutStats(), func(c *config) {
+			c.commandsDelay = time.Millisecond
+			c.commandsRetry = 10 * time.Millisecond
+		})...)
+		t.Cleanup(p.Stop)
+		p.onReady(p.shards[0], &discordgo.Ready{User: &discordgo.User{ID: "123"}})
+		return p
+	}
+	ping := `[{"type":1,"name":"ping","description":"Pong"}]`
+	settled := func(t *testing.T, f *fakeAPI, want int) {
+		t.Helper()
+		waitFor(t, "the commands posts", func() bool { return len(f.requests("commands")) == want })
+		time.Sleep(50 * time.Millisecond)
+		if n := len(f.requests("commands")); n != want {
+			t.Fatalf("commands requests = %d, want %d", n, want)
+		}
+	}
+
+	t.Run("5xx", func(t *testing.T) {
+		f := newFakeAPI(t)
+		f.commands = ping
+		f.queue("commands", reply{status: 503}, reply{status: 503}, reply{status: 503})
+		retrying(f)
+		settled(t, f, 4)
+	})
+	t.Run("429 past the next retry", func(t *testing.T) {
+		f := newFakeAPI(t)
+		f.commands = ping
+		f.queue("commands", reply{status: 429, header: map[string]string{"Retry-After": "120"}})
+		p := retrying(f)
+		settled(t, f, 1)
+		// Retries during the suspension send nothing; the first one after it posts.
+		p.api.mu.Lock()
+		p.api.suspendedUntil = time.Time{}
+		p.api.mu.Unlock()
+		settled(t, f, 2)
+	})
+	t.Run("Discord fetch failure", func(t *testing.T) {
+		f := newFakeAPI(t)
+		f.commands = "not json"
+		retrying(f)
+		time.Sleep(50 * time.Millisecond)
+		f.mu.Lock()
+		f.commands = ping
+		f.mu.Unlock()
+		settled(t, f, 1)
+	})
+	for _, status := range []int{404, 409, 422} {
+		t.Run(strconv.Itoa(status)+" is terminal", func(t *testing.T) {
+			f := newFakeAPI(t)
+			f.commands = ping
+			f.queue("commands", reply{status: status})
+			retrying(f)
+			settled(t, f, 1)
+		})
+	}
+}
+
 func TestEmptyCommandsNeedOptIn(t *testing.T) {
 	f := newFakeAPI(t)
 	p := Autopost(newSession(t, f, 0, 1), "tok", testOptions(f, WithoutHeartbeat(), WithoutStats())...)
