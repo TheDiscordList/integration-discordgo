@@ -190,10 +190,13 @@ func (p *Poster) publishStats(ctx context.Context, manual bool) Result {
 
 // measure returns false when the count cannot be trusted, so the caller
 // retries later rather than publishing a wrong number.
-func (p *Poster) measure(ctx context.Context) (int, bool) {
+func (p *Poster) measure(ctx context.Context) (count int, ok bool) {
 	if p.cfg.serverCount != nil {
-		n, err := p.cfg.serverCount(ctx)
-		return n, err == nil && n >= 0
+		p.guarded(func() {
+			n, err := p.cfg.serverCount(ctx)
+			count, ok = n, err == nil && n >= 0
+		})
+		return count, ok
 	}
 	if !p.topo.localTotal {
 		return 0, false

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -798,14 +799,31 @@ func TestPanickingCallbackIsContained(t *testing.T) {
 	p := Autopost(newSession(t, f, 0, 1, "g1"), "tok", testOptions(f, WithoutHeartbeat(),
 		OnPosted(func(Kind, int) { panic("boom") }))...)
 	prime(p)
-	if res := p.PostStats(context.Background()); res.Skipped != "panic" {
-		t.Fatalf("PostStats = %+v, want skipped panic", res)
-	}
-	// The in-flight guard was released by the unwinding panic.
-	p.cfg.onPosted = nil
 	if res := p.PostStats(context.Background()); !res.OK {
-		t.Fatalf("PostStats after panic = %+v", res)
+		t.Fatalf("PostStats = %+v, want sent", res)
 	}
+}
+
+func TestPanickingCallbacksDoNotStopThePublisher(t *testing.T) {
+	f := newFakeAPI(t)
+	var calls atomic.Int32
+	p := Autopost(newSession(t, f, 0, 1), "tok", testOptions(f, WithoutHeartbeat(), WithoutCommands(),
+		WithServerCount(func(context.Context) (int, error) {
+			if calls.Add(1) == 1 {
+				panic("boom")
+			}
+			return int(calls.Load()), nil
+		}),
+		OnPosted(func(Kind, int) { panic("boom") }),
+		func(c *config) {
+			c.statsFirstDelay = time.Millisecond
+			c.statsRemeasure = time.Millisecond
+			c.statsInterval = time.Millisecond
+		},
+	)...)
+	defer p.Stop()
+	p.onReady(p.shards[0], &discordgo.Ready{User: &discordgo.User{ID: "123"}})
+	waitFor(t, "two stats posts", func() bool { return len(f.requests("stats")) >= 2 })
 }
 
 func TestBackoffBounds(t *testing.T) {

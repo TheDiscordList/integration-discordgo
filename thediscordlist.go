@@ -562,15 +562,26 @@ func (p *Poster) warnLocked(key, msg string) {
 	}
 }
 
+// guarded runs a user callback. A panic unwinding through a publisher would skip
+// its reschedule and stop it for good.
+func (p *Poster) guarded(callback func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			p.cfg.logger.Error("thediscordlist: recovered from a panic in a callback", "panic", r)
+		}
+	}()
+	callback()
+}
+
 func (p *Poster) emitPosted(kind Kind, status int) {
 	if p.cfg.onPosted != nil {
-		p.cfg.onPosted(kind, status)
+		p.guarded(func() { p.cfg.onPosted(kind, status) })
 	}
 }
 
 func (p *Poster) emitError(err *Error) {
 	if p.cfg.onError != nil {
-		p.cfg.onError(err)
+		p.guarded(func() { p.cfg.onError(err) })
 		return
 	}
 	p.cfg.logger.Warn(err.Error())
@@ -578,7 +589,7 @@ func (p *Poster) emitError(err *Error) {
 
 func (p *Poster) emitDisabled(kind Kind, status int, reason string) {
 	if p.cfg.onDisabled != nil {
-		p.cfg.onDisabled(kind, status, reason)
+		p.guarded(func() { p.cfg.onDisabled(kind, status, reason) })
 		return
 	}
 	p.cfg.logger.Warn("thediscordlist: publisher disabled", "kind", kind, "status", status, "reason", reason)
