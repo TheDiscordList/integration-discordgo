@@ -5,6 +5,24 @@ tags; see "Publishing" in the README.
 
 ## Unreleased
 
+## 0.2.1 - 2026-11-03
+
+- Heartbeats omit a shard's `guilds` until that shard is ready, so a restart
+  cannot zero the listing's public count.
+- Commands are retried every 5 minutes after a `5xx`, a `429` or a failed fetch
+  from Discord, until they post or get a terminal `4xx`. A manual `PostCommands`
+  no longer waits out a `429` longer than that.
+- A `429` on a heartbeat no longer suspends stats and commands, whose limit is
+  separate.
+- A panicking callback no longer stops a publisher, and `PostX` then returns the
+  request's real result instead of `Skipped: "panic"`.
+- A panicking `Handler.OnError` no longer crashes the process.
+- `WithStatsInterval` is never below 60 seconds; 0 used to spin a core.
+- Redirects are no longer followed: one turned a POST into a GET, and its `200`
+  read as posted. A `3xx` is now retried like a `5xx`, as in every other SDK.
+- The release workflow pins its actions to commit SHAs and refuses a tag that is
+  not on `main`.
+
 ## 0.2.0 - 2026-10-18
 
 - `webhooks.Verify` and the `Handler` fail closed on an empty secret, with the
