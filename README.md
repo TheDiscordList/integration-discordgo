@@ -299,7 +299,7 @@ send time; never use it for freshness.
 
 ## Requirements
 
-- Go 1.25 or newer (CI runs the two latest releases)
+- Go 1.26 or newer (CI runs the two latest releases)
 - discordgo v0.28.1 or newer, tested through v0.29.x
 
 ## Publishing (maintainers)
