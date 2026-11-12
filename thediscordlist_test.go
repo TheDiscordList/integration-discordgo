@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -254,9 +255,38 @@ func TestHeartbeatPayload(t *testing.T) {
 	}
 	want := `{"cluster":0,"cluster_count":1,"shards":[` +
 		`{"id":0,"status":"ready","latency_ms":42,"guilds":2},` +
-		`{"id":1,"status":"connecting","guilds":0}]}`
+		`{"id":1,"status":"connecting"}]}`
 	if r.body != want {
 		t.Errorf("body = %s\nwant   %s", r.body, want)
+	}
+}
+
+func TestShardGuildsWaitForReady(t *testing.T) {
+	f := newFakeAPI(t)
+	p := Autopost(newSession(t, f, 0, 1, "g1"), "tok", testOptions(f, WithBotID("123"), WithoutStats(), WithoutCommands())...)
+	defer p.Stop()
+	sh := p.shards[0]
+	guilds := func() *int {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.collectShardsLocked()[0].Guilds
+	}
+
+	if guilds() != nil {
+		t.Error("a booting shard reported guilds")
+	}
+	// discordgo emits Connect even when the gateway's first packet is not READY.
+	p.onStatus(sh, "ready")
+	if guilds() != nil {
+		t.Error("a shard reported guilds before its READY")
+	}
+	p.onReady(sh, &discordgo.Ready{User: &discordgo.User{ID: "123"}})
+	if n := guilds(); n == nil || *n != 1 {
+		t.Errorf("guilds after READY = %v, want 1", n)
+	}
+	p.onStatus(sh, "connecting")
+	if guilds() != nil {
+		t.Error("a reconnecting shard reported guilds")
 	}
 }
 
@@ -285,6 +315,66 @@ func TestCommandsAreForwarded(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("body lacks %s: %s", want, got)
 		}
+	}
+}
+
+func TestCommandsRetryUntilSuccessOrATerminal4xx(t *testing.T) {
+	retrying := func(f *fakeAPI) *Poster {
+		p := Autopost(newSession(t, f, 0, 1), "tok", testOptions(f, WithoutHeartbeat(), WithoutStats(), func(c *config) {
+			c.commandsDelay = time.Millisecond
+			c.commandsRetry = 10 * time.Millisecond
+		})...)
+		t.Cleanup(p.Stop)
+		p.onReady(p.shards[0], &discordgo.Ready{User: &discordgo.User{ID: "123"}})
+		return p
+	}
+	ping := `[{"type":1,"name":"ping","description":"Pong"}]`
+	settled := func(t *testing.T, f *fakeAPI, want int) {
+		t.Helper()
+		waitFor(t, "the commands posts", func() bool { return len(f.requests("commands")) == want })
+		time.Sleep(50 * time.Millisecond)
+		if n := len(f.requests("commands")); n != want {
+			t.Fatalf("commands requests = %d, want %d", n, want)
+		}
+	}
+
+	t.Run("5xx", func(t *testing.T) {
+		f := newFakeAPI(t)
+		f.commands = ping
+		f.queue("commands", reply{status: 503}, reply{status: 503}, reply{status: 503})
+		retrying(f)
+		settled(t, f, 4)
+	})
+	t.Run("429 past the next retry", func(t *testing.T) {
+		f := newFakeAPI(t)
+		f.commands = ping
+		f.queue("commands", reply{status: 429, header: map[string]string{"Retry-After": "120"}})
+		p := retrying(f)
+		settled(t, f, 1)
+		// Retries during the suspension send nothing; the first one after it posts.
+		p.api.mu.Lock()
+		p.api.suspendedUntil = time.Time{}
+		p.api.mu.Unlock()
+		settled(t, f, 2)
+	})
+	t.Run("Discord fetch failure", func(t *testing.T) {
+		f := newFakeAPI(t)
+		f.commands = "not json"
+		retrying(f)
+		time.Sleep(50 * time.Millisecond)
+		f.mu.Lock()
+		f.commands = ping
+		f.mu.Unlock()
+		settled(t, f, 1)
+	})
+	for _, status := range []int{404, 409, 422} {
+		t.Run(strconv.Itoa(status)+" is terminal", func(t *testing.T) {
+			f := newFakeAPI(t)
+			f.commands = ping
+			f.queue("commands", reply{status: status})
+			retrying(f)
+			settled(t, f, 1)
+		})
 	}
 }
 
@@ -327,6 +417,7 @@ func TestStatusHandling(t *testing.T) {
 		{"409 disables commands", KindCommands, []int{409}, Result{Status: 409}, 1, map[Kind]string{KindCommands: "conflict"}, 0},
 		{"422 is reported and stays enabled", KindStats, []int{422}, Result{Status: 422}, 1, map[Kind]string{}, 1},
 		{"5xx is retried", KindStats, []int{502, 500, 200}, Result{OK: true, Status: 200}, 3, map[Kind]string{}, 0},
+		{"a redirect is not followed", KindStats, []int{302, 302, 302}, Result{Status: 302}, 3, map[Kind]string{}, 1},
 		{"408 and 425 are retried", KindStats, []int{408, 425, 200}, Result{OK: true, Status: 200}, 3, map[Kind]string{}, 0},
 		{"other 4xx is reported, not retried", KindStats, []int{413}, Result{Status: 413}, 1, map[Kind]string{}, 1},
 		{"5xx gives up after three attempts", KindHeartbeat, []int{503, 503, 503}, Result{Status: 503}, 3, map[Kind]string{}, 1},
@@ -439,6 +530,28 @@ func TestRateLimitSuspension(t *testing.T) {
 				t.Errorf("PostHeartbeat = %+v, want sent", res)
 			}
 		})
+	}
+}
+
+func TestHeartbeatRateLimitLeavesStatsAndCommandsAlone(t *testing.T) {
+	f := newFakeAPI(t)
+	f.commands = `[{"type":1,"name":"ping","description":"Pong"}]`
+	f.queue("heartbeat", reply{status: 429, header: map[string]string{"Retry-After": "120"}, body: "{}"})
+	p := Autopost(newSession(t, f, 0, 1, "g1"), "tok", testOptions(f)...)
+	prime(p)
+
+	if res := p.PostHeartbeat(context.Background()); res != (Result{Status: 429, Skipped: "throttled"}) {
+		t.Fatalf("PostHeartbeat = %+v", res)
+	}
+	// The wait outlasts the next beat, so it is not retried straight away either.
+	if n := len(f.requests("heartbeat")); n != 1 {
+		t.Fatalf("heartbeat requests = %d, want 1", n)
+	}
+	if res := p.PostStats(context.Background()); !res.OK {
+		t.Errorf("PostStats = %+v, want sent", res)
+	}
+	if res := p.PostCommands(context.Background()); !res.OK {
+		t.Errorf("PostCommands = %+v, want sent", res)
 	}
 }
 
@@ -576,6 +689,15 @@ func TestManualPostRearms(t *testing.T) {
 	}
 }
 
+func TestStatsIntervalHasAFloor(t *testing.T) {
+	f := newFakeAPI(t)
+	p := Autopost(newSession(t, f, 0, 1), "tok", WithBaseURL(f.srv.URL), WithLogger(quietLogger), WithStatsInterval(0))
+	defer p.Stop()
+	if p.cfg.statsInterval != statsMinGap {
+		t.Fatalf("interval = %v, want %v", p.cfg.statsInterval, statsMinGap)
+	}
+}
+
 func TestStatsMinGapAndUnchanged(t *testing.T) {
 	f := newFakeAPI(t)
 	s := newSession(t, f, 0, 1, "g1")
@@ -687,14 +809,31 @@ func TestPanickingCallbackIsContained(t *testing.T) {
 	p := Autopost(newSession(t, f, 0, 1, "g1"), "tok", testOptions(f, WithoutHeartbeat(),
 		OnPosted(func(Kind, int) { panic("boom") }))...)
 	prime(p)
-	if res := p.PostStats(context.Background()); res.Skipped != "panic" {
-		t.Fatalf("PostStats = %+v, want skipped panic", res)
-	}
-	// The in-flight guard was released by the unwinding panic.
-	p.cfg.onPosted = nil
 	if res := p.PostStats(context.Background()); !res.OK {
-		t.Fatalf("PostStats after panic = %+v", res)
+		t.Fatalf("PostStats = %+v, want sent", res)
 	}
+}
+
+func TestPanickingCallbacksDoNotStopThePublisher(t *testing.T) {
+	f := newFakeAPI(t)
+	var calls atomic.Int32
+	p := Autopost(newSession(t, f, 0, 1), "tok", testOptions(f, WithoutHeartbeat(), WithoutCommands(),
+		WithServerCount(func(context.Context) (int, error) {
+			if calls.Add(1) == 1 {
+				panic("boom")
+			}
+			return int(calls.Load()), nil
+		}),
+		OnPosted(func(Kind, int) { panic("boom") }),
+		func(c *config) {
+			c.statsFirstDelay = time.Millisecond
+			c.statsRemeasure = time.Millisecond
+			c.statsInterval = time.Millisecond
+		},
+	)...)
+	defer p.Stop()
+	p.onReady(p.shards[0], &discordgo.Ready{User: &discordgo.User{ID: "123"}})
+	waitFor(t, "two stats posts", func() bool { return len(f.requests("stats")) >= 2 })
 }
 
 func TestBackoffBounds(t *testing.T) {

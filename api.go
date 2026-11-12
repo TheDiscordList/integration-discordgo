@@ -39,9 +39,11 @@ type outcome struct {
 	wait time.Duration
 }
 
-// apiClient is shared by every publisher. The server counts stats and
-// commands against one per-bot budget, so a 429 suspends them together. Heartbeats bypass the suspension: a dropped stats post is
-// a stale number, a dropped heartbeat is a false "down" on the status page.
+// apiClient is shared by every publisher. The server counts stats and commands
+// against one per-bot budget, so a 429 on either suspends them together.
+// Heartbeats have their own limiter, so they neither set nor obey the
+// suspension: a dropped stats post is a stale number, a dropped heartbeat is a
+// false "down" on the status page.
 type apiClient struct {
 	http      *http.Client
 	baseURL   string
@@ -54,7 +56,11 @@ type apiClient struct {
 
 func newAPIClient(baseURL, token string) *apiClient {
 	return &apiClient{
-		http:      &http.Client{Timeout: requestTimeout},
+		http: &http.Client{
+			Timeout: requestTimeout,
+			// Following one turns the POST into a GET, whose 200 would read as posted.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		baseURL:   baseURL,
 		token:     token,
 		userAgent: "TheDiscordList-discordgo/" + moduleVersion() + " (+https://" + modulePath + ")",
@@ -108,22 +114,29 @@ func (c *apiClient) post(ctx context.Context, path string, payload any, heartbea
 
 	out := classify(resp.StatusCode, body)
 	if out.kind == outcomeThrottled {
-		out.wait = c.suspend(resp.Header)
+		out.wait = retryAfter(resp.Header)
+		if !heartbeat {
+			c.suspend(out.wait)
+		}
 	}
 	return out
 }
 
-// suspend honours Retry-After and X-RateLimit-Reset, whichever is later, up
-// to an hour. The deadline is taken from time.Now so it stays monotonic.
-func (c *apiClient) suspend(h http.Header) time.Duration {
-	wait := time.Minute
+// retryAfter honours Retry-After and X-RateLimit-Reset, whichever is later, up
+// to an hour.
+func retryAfter(h http.Header) time.Duration {
+	wait := defaultThrottle
 	if seconds, err := strconv.ParseFloat(h.Get("Retry-After"), 64); err == nil && seconds > 0 {
 		wait = time.Duration(min(seconds, maxThrottle.Seconds()) * float64(time.Second))
 	}
 	if reset, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); err == nil && reset > 0 {
 		wait = max(wait, time.Until(time.Unix(reset, 0)))
 	}
-	wait = min(wait, maxThrottle) + time.Duration(rand.Int64N(int64(2*time.Second)))
+	return min(wait, maxThrottle) + time.Duration(rand.Int64N(int64(throttleJitter)))
+}
+
+// suspend takes its deadline from time.Now, so it stays monotonic.
+func (c *apiClient) suspend(wait time.Duration) {
 	until := time.Now().Add(wait)
 
 	c.mu.Lock()
@@ -131,7 +144,6 @@ func (c *apiClient) suspend(h http.Header) time.Duration {
 		c.suspendedUntil = until
 	}
 	c.mu.Unlock()
-	return wait
 }
 
 // classify mirrors the server's precedence 404 → 429 → 401 → 422 → 403/409.
@@ -159,6 +171,6 @@ func classify(status int, body []byte) outcome {
 
 // backoff is min(1s·2^attempt, 30s), scaled into its upper half at random.
 func backoff(attempt int) time.Duration {
-	d := min(time.Second<<attempt, 30*time.Second)
+	d := min(backoffBase<<attempt, backoffMax)
 	return time.Duration(float64(d) * (0.5 + rand.Float64()*0.5))
 }

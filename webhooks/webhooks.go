@@ -314,8 +314,11 @@ func verifyStatus(err error) int {
 	return http.StatusBadRequest
 }
 
+// report recovers because OnEvent runs on its own goroutine, where net/http's
+// recovery does not reach and a panic would take down the process.
 func (h *Handler) report(err error) {
 	if h.OnError != nil {
+		defer func() { _ = recover() }()
 		h.OnError(err)
 	}
 }

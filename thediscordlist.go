@@ -90,6 +90,7 @@ type config struct {
 	statsRemeasure    time.Duration
 	heartbeatInterval time.Duration
 	commandsDelay     time.Duration
+	commandsRetry     time.Duration
 	backoff           func(attempt int) time.Duration
 }
 
@@ -106,7 +107,8 @@ func WithBaseURL(url string) Option {
 // so a booting bot reads "connecting" rather than down.
 func WithBotID(id string) Option { return func(c *config) { c.botID = id } }
 
-// WithStatsInterval sets the stats cadence. Default 5 minutes.
+// WithStatsInterval sets the stats cadence, never below a minute. Default 5
+// minutes.
 func WithStatsInterval(d time.Duration) Option { return func(c *config) { c.statsInterval = d } }
 
 // WithHeartbeatInterval sets the starting heartbeat cadence, clamped to 15–60
@@ -156,6 +158,14 @@ func OnError(fn func(err *Error)) Option { return func(c *config) { c.onError = 
 func OnDisabled(fn func(kind Kind, status int, reason string)) Option {
 	return func(c *config) { c.onDisabled = fn }
 }
+
+// The shard states this package sends. discordgo does not expose a resume in
+// progress, so the API's "resuming" never appears.
+const (
+	shardReady        = "ready"
+	shardConnecting   = "connecting"
+	shardDisconnected = "disconnected"
+)
 
 type shard struct {
 	session   *discordgo.Session
@@ -239,11 +249,14 @@ func AutopostShards(sessions []*discordgo.Session, token string, opts ...Option)
 		statsRemeasure:    statsRemeasure,
 		heartbeatInterval: heartbeatInterval,
 		commandsDelay:     commandsDelay,
+		commandsRetry:     commandsRetry,
 		backoff:           backoff,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	// An unchanged count reschedules at this interval, so 0 would spin a core.
+	cfg.statsInterval = max(cfg.statsInterval, cfg.statsMinGap)
 
 	p := &Poster{cfg: cfg, warned: map[string]bool{}, lastCount: -1,
 		beatInterval: min(max(cfg.heartbeatInterval, heartbeatMin), heartbeatMax)}
@@ -256,7 +269,7 @@ func AutopostShards(sessions []*discordgo.Session, token string, opts ...Option)
 	}
 	for _, s := range sessions {
 		if s != nil {
-			p.shards = append(p.shards, &shard{session: s, status: "connecting", outage: map[string]struct{}{}})
+			p.shards = append(p.shards, &shard{session: s, status: shardConnecting, outage: map[string]struct{}{}})
 		}
 	}
 	if len(p.shards) == 0 {
@@ -295,14 +308,14 @@ func AutopostShards(sessions []*discordgo.Session, token string, opts ...Option)
 		s := sh.session
 		p.detach = append(p.detach,
 			s.AddHandler(func(_ *discordgo.Session, e *discordgo.Ready) { p.onReady(sh, e) }),
-			s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Resumed) { p.onStatus(sh, "ready") }),
-			s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Connect) { p.onStatus(sh, "ready") }),
+			s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Resumed) { p.onStatus(sh, shardReady) }),
+			s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Connect) { p.onStatus(sh, shardReady) }),
 			s.AddHandler(func(s *discordgo.Session, _ *discordgo.Disconnect) {
 				// discordgo reconnects on its own unless told not to.
 				if s.ShouldReconnectOnError {
-					p.onStatus(sh, "connecting")
+					p.onStatus(sh, shardConnecting)
 				} else {
-					p.onStatus(sh, "disconnected")
+					p.onStatus(sh, shardDisconnected)
 				}
 			}),
 			s.AddHandler(func(_ *discordgo.Session, e *discordgo.GuildCreate) { p.onGuildCreate(sh, e) }),
@@ -372,7 +385,7 @@ func (p *Poster) inspectSessions() {
 		}
 		s.State.RLock()
 		if s.State.User != nil {
-			sh.status, sh.everReady = "ready", true
+			sh.status, sh.everReady = shardReady, true
 			if p.botID == "" {
 				p.botID = readyBotID(&s.State.Ready)
 			}
@@ -394,7 +407,7 @@ func readyBotID(r *discordgo.Ready) string {
 func (p *Poster) onReady(sh *shard, r *discordgo.Ready) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	sh.status, sh.everReady = "ready", true
+	sh.status, sh.everReady = shardReady, true
 	clear(sh.outage)
 	if p.botID == "" && r != nil {
 		p.botID = readyBotID(r)
@@ -560,15 +573,26 @@ func (p *Poster) warnLocked(key, msg string) {
 	}
 }
 
+// guarded runs a user callback. A panic unwinding through a publisher would skip
+// its reschedule and stop it for good.
+func (p *Poster) guarded(callback func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			p.cfg.logger.Error("thediscordlist: recovered from a panic in a callback", "panic", r)
+		}
+	}()
+	callback()
+}
+
 func (p *Poster) emitPosted(kind Kind, status int) {
 	if p.cfg.onPosted != nil {
-		p.cfg.onPosted(kind, status)
+		p.guarded(func() { p.cfg.onPosted(kind, status) })
 	}
 }
 
 func (p *Poster) emitError(err *Error) {
 	if p.cfg.onError != nil {
-		p.cfg.onError(err)
+		p.guarded(func() { p.cfg.onError(err) })
 		return
 	}
 	p.cfg.logger.Warn(err.Error())
@@ -576,7 +600,7 @@ func (p *Poster) emitError(err *Error) {
 
 func (p *Poster) emitDisabled(kind Kind, status int, reason string) {
 	if p.cfg.onDisabled != nil {
-		p.cfg.onDisabled(kind, status, reason)
+		p.guarded(func() { p.cfg.onDisabled(kind, status, reason) })
 		return
 	}
 	p.cfg.logger.Warn("thediscordlist: publisher disabled", "kind", kind, "status", status, "reason", reason)

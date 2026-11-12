@@ -48,7 +48,7 @@ recommended production setup. It starts three publishers:
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5s after READY, then every 5 min, debounced (20s) on guild join/leave |
 | Heartbeat | per-shard status, latency and guild counts | every 30–35s, plus once when a shard connects, resumes or drops (at least 10s after the previous beat) |
-| Commands | your registered global slash commands | once, ~10s after READY |
+| Commands | your registered global slash commands | once, ~10s after READY, retried every 5 min after a server error, a rate limit or a failed fetch from Discord |
 
 Your **stats token** is on the listing's manage page, under the API tab. It is
 scoped to one listing, so it is the only credential this package needs.
@@ -178,6 +178,10 @@ nothing was sent, which is usually correct rather than a failure.
 An explicit `PostX` also re-arms a publisher that disabled itself, so you can
 retry after fixing a token or a listing id without restarting.
 
+Call `Stop` when you close the session. discordgo has no terminal shutdown
+signal: `Disconnect` also fires on every reconnect, so a `Poster` cannot stop
+itself, and it would keep reporting the shard as connecting.
+
 ## Webhooks
 
 ```go
@@ -272,12 +276,12 @@ send time; never use it for freshness.
 - **Heartbeats need Gold or higher.** On a `403` the heartbeat publisher
   suspends and reprobes every 30 minutes rather than disabling: the plan is
   checked per request, so a bot can gain it mid-run.
-- **Rate limits are shared.** The API counts stats and commands against one
-  budget per bot (60/min; heartbeats have their own 120/min). On a
-  `429` this package honours `Retry-After` and `X-RateLimit-Reset` (default
-  60s, at most an hour) with one client-wide suspension for stats and commands;
-  heartbeats bypass it — a stale number beats a false "down" on your status
-  page.
+- **Stats and commands share a rate limit.** The API counts them against one
+  budget of 60/min per bot. On a `429` from either this package honours
+  `Retry-After` and `X-RateLimit-Reset` (default 60s, at most an hour) with one
+  client-wide suspension for both. Heartbeats have their own limit and ignore
+  the suspension — a stale number beats a false "down" on your status page — so
+  a `429` on a heartbeat delays only that heartbeat.
 - **Retries never outrun the next tick.** A network error, `408`, `425` or
   `5xx` is retried up to 3 attempts with backoff, and a `429` once its wait has
   passed, unless the publisher's next tick comes first. Any other `4xx` is
@@ -291,7 +295,8 @@ send time; never use it for freshness.
   comes back or Discord says the bot left.
 - **`session.StateEnabled` must stay on**, or the guild cache is empty. With
   it off, pass `WithServerCount`; per-shard guild counts are then omitted from
-  heartbeats.
+  heartbeats. They are also omitted while a shard is not ready, so a restart
+  cannot publish a false 0.
 - Without `discordgo.IntentsGuilds`, join and leave events never arrive and the
   count only moves on the next READY. The package warns once.
 - Shard latency comes from `session.HeartbeatLatency()` and is omitted until
@@ -317,10 +322,10 @@ Each release:
 
 1. Move the `Unreleased` entries in `CHANGELOG.md` under the new version and
    merge to `main`.
-2. Tag `main` and push the tag: `git tag v0.1.0 && git push origin v0.1.0`.
+2. Tag `main` and push the tag: `git tag v0.3.0 && git push origin v0.3.0`.
 3. `release.yml` runs vet and the tests, creates the GitHub Release with
    generated notes, and runs
-   `GOPROXY=proxy.golang.org go list -m github.com/TheDiscordList/integration-discordgo@v0.1.0`
+   `GOPROXY=proxy.golang.org go list -m github.com/TheDiscordList/integration-discordgo@v0.3.0`
    so pkg.go.dev picks the version up within minutes.
 
 Never move or delete a pushed tag: the checksum database has already recorded
