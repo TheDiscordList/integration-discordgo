@@ -322,10 +322,10 @@ Each release:
 
 1. Move the `Unreleased` entries in `CHANGELOG.md` under the new version and
    merge to `main`.
-2. Tag `main` and push the tag: `git tag v0.2.1 && git push origin v0.2.1`.
+2. Tag `main` and push the tag: `git tag v0.3.0 && git push origin v0.3.0`.
 3. `release.yml` runs vet and the tests, creates the GitHub Release with
    generated notes, and runs
-   `GOPROXY=proxy.golang.org go list -m github.com/TheDiscordList/integration-discordgo@v0.2.1`
+   `GOPROXY=proxy.golang.org go list -m github.com/TheDiscordList/integration-discordgo@v0.3.0`
    so pkg.go.dev picks the version up within minutes.
 
 Never move or delete a pushed tag: the checksum database has already recorded

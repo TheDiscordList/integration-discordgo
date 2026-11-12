@@ -5,8 +5,11 @@ tags; see "Publishing" in the README.
 
 ## Unreleased
 
-## 0.2.1 - 2026-11-03
+## 0.3.0 - 2026-11-12
 
+- Go 1.26 or newer is now required (the `go` directive is `1.26.0`).
+- `golang.org/x/crypto` is v0.58.0 and `golang.org/x/sys` v0.49.0, which fix
+  three `x/crypto` CVEs.
 - Heartbeats omit a shard's `guilds` until that shard is ready, so a restart
   cannot zero the listing's public count.
 - Commands are retried every 5 minutes after a `5xx`, a `429` or a failed fetch
@@ -20,8 +23,7 @@ tags; see "Publishing" in the README.
 - `WithStatsInterval` is never below 60 seconds; 0 used to spin a core.
 - Redirects are no longer followed: one turned a POST into a GET, and its `200`
   read as posted. A `3xx` is now retried like a `5xx`, as in every other SDK.
-- The release workflow pins its actions to commit SHAs and refuses a tag that is
-  not on `main`.
+- The release workflow refuses a tag that is not on `main`.
 
 ## 0.2.0 - 2026-10-18
 
